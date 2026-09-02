@@ -19,11 +19,9 @@ typedef enum
 
 void MeasurementState_Init(void);
 
-/* 启动测量 (串口 'S' / 按键短按): 开 ADG + 连续模式一 */
+/* 启动单次测量 (串口 'S'): 开 ADG + 模式一 1s 窗口;
+ * >=1nA 直接出结果; <1nA 自动接模式二 10s; 测完自动回 IDLE */
 void MeasurementState_StartCommand(void);
-
-/* 停止测量 (串口 'X'): 停 TIM6 + 关 ADG, 回空闲 */
-void MeasurementState_StopCommand(void);
 
 MeasurementProcessResult MeasurementState_Process(void);
 MeasurementState MeasurementState_GetState(void);

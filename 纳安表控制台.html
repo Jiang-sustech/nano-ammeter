@@ -73,7 +73,7 @@
   button.primary { background: #1f6feb; border-color: #1f6feb; }
   button.primary:hover { background: #2f81f7; }
 
-  .ctrl-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .ctrl-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
   .ctrl-btn {
     display: flex;
     flex-direction: column;
@@ -88,8 +88,6 @@
   .ctrl-btn .hint { font-size: 0.75rem; color: var(--dim); font-weight: 400; }
   #btnStart  { background: rgba(63,185,80,0.12);  border-color: var(--green); color: var(--green); }
   #btnStart:hover  { background: rgba(63,185,80,0.25); }
-  #btnStop   { background: rgba(248,81,73,0.12);  border-color: var(--red);   color: var(--red); }
-  #btnStop:hover   { background: rgba(248,81,73,0.25); }
   #btnNoise  { background: rgba(210,153,34,0.12); border-color: var(--amber); color: var(--amber); }
   #btnNoise:hover  { background: rgba(210,153,34,0.25); }
   .ctrl-btn:disabled { opacity: 0.3; }
@@ -179,12 +177,8 @@
   <h2>测量控制</h2>
   <div class="ctrl-grid">
     <button class="ctrl-btn" id="btnStart" disabled>
-      <span class="icon">▶</span>启动测量
-      <span class="hint">指令 S · 快捷键 S</span>
-    </button>
-    <button class="ctrl-btn" id="btnStop" disabled>
-      <span class="icon">■</span>停止测量
-      <span class="hint">指令 X · 快捷键 X</span>
+      <span class="icon">▶</span>单次测量
+      <span class="hint">指令 S · 测完自动回空闲 · 快捷键 S</span>
     </button>
     <button class="ctrl-btn" id="btnNoise" disabled>
       <span class="icon">∿</span>底噪标定
@@ -227,8 +221,8 @@
 </div>
 
 <footer>
-  <b>使用说明：</b>① 打开台式电源给板子供电 → ② 板载 USB-C 插到电脑 → ③ 本页用 <b>Chrome / Edge</b> 打开 → ④ 点「连接串口」选 CH340 (COM 口) → ⑤ 点按钮控制测量。<br>
-  <b>注意：</b>烧录固件用 ST-Link；本页只负责控制与数据回传（115200 8N1）。串口助手不能与本页同时占用同一 COM 口。快捷键 S / X / N 与按钮等效（输入框聚焦时除外）。
+  <b>使用说明：</b>① 打开台式电源给板子供电 → ② 板载 USB-C 插到电脑 → ③ 本页用 <b>Chrome / Edge</b> 打开 → ④ 点「连接串口」选 CH340 (COM 口) → ⑤ 点「单次测量」：一次点击 = 一次完整测量（1 秒窗口，<1nA 自动接 10 秒双斜率），测完自动停住显示结果。<br>
+  <b>注意：</b>烧录固件用 ST-Link；本页只负责控制与数据回传（115200 8N1）。测量期间指令会被忽略，结果出来后可再次点击。快捷键 S / N 与按钮等效（输入框聚焦时除外）。
 </footer>
 
 <script>
@@ -271,7 +265,6 @@ function setConnected(on, name) {
   $('btnConnect').disabled = on;
   $('btnDisconnect').disabled = !on;
   $('btnStart').disabled = !on;
-  $('btnStop').disabled = !on;
   $('btnNoise').disabled = !on;
   $('btnQuery').disabled = !on;
   $('btnWave').disabled = !on;
@@ -499,7 +492,6 @@ navigator.serial?.addEventListener('disconnect', e => {
 $('btnConnect').onclick = connect;
 $('btnDisconnect').onclick = disconnect;
 $('btnStart').onclick = () => send('S');
-$('btnStop').onclick = () => send('X');
 $('btnNoise').onclick = () => send('N');
 $('btnQuery').onclick = () => send('D');
 $('btnWave').onclick = () => { $('btnCsv').disabled = true; send('B'); };
@@ -531,7 +523,6 @@ document.addEventListener('keydown', e => {
   if (tag === 'INPUT' || tag === 'TEXTAREA') return;
   const k = e.key.toUpperCase();
   if (k === 'S') $('btnStart').click();
-  else if (k === 'X') $('btnStop').click();
   else if (k === 'N') $('btnNoise').click();
 });
 

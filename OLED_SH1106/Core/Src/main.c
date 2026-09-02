@@ -236,14 +236,14 @@ int main(void)
     Button_Task();
 #endif
 
-    /* 底噪模式运行期间忽略按键与指令 (测量中不可打断) */
-    if (!noise_mode_active)
+    /* 测量/底噪期间忽略一切指令 (单次语义: 测完自动回 IDLE 后才接受新指令) */
+    if (!noise_mode_active
+        && MeasurementState_GetState() == MEASUREMENT_STATE_IDLE)
     {
       /* 长按(>3s): 底噪/偏置电流测量 (ADG 全断, 纯积分) */
 #ifndef BUTTON_DISABLED
       if (Button_LongPressRequested())
       {
-        MeasurementState_StopCommand();
         Noise_Start();
         noise_mode_active = 1;
         OLED_DrawScreen("+0.000", "nA", "MODE:NOISE");
@@ -252,7 +252,7 @@ int main(void)
       }
 #endif
 
-      /* 串口指令: S=启动 X=停止 N=底噪 D=查询结果 B=回传波形 */
+      /* 串口指令: S=单次测量 N=底噪 D=查询结果 B=回传波形 */
       char cmd = UART_GetCommand();
       switch (cmd)
       {
@@ -261,12 +261,7 @@ int main(void)
         OLED_DrawScreen("+0.000", "nA", "MODE1 RUN");
         UART_SendString("START MODE1\r\n");
         break;
-      case 'X':
-        MeasurementState_StopCommand();
-        UART_SendString("STOP IDLE\r\n");
-        break;
       case 'N':
-        MeasurementState_StopCommand();
         Noise_Start();
         noise_mode_active = 1;
         OLED_DrawScreen("+0.000", "nA", "MODE:NOISE");
@@ -282,24 +277,13 @@ int main(void)
         break;
       }
 
-      /* 短按: 空闲时启动测量; 测量中则刷新显示上一秒结果 */
+      /* 短按: 启动单次测量 */
 #ifndef BUTTON_DISABLED
       if (Button_StartRequested())
       {
-        if (MeasurementState_GetState() == MEASUREMENT_STATE_IDLE)
-        {
-          MeasurementState_StartCommand();
-          OLED_DrawScreen("+0.000", "nA", "MODE1 RUN");
-          UART_SendString("START MODE1\r\n");
-        }
-        else
-        {
-          char v[24];
-          FormatCurrentNA(MeasurementState_GetResult(), v);
-          OLED_DrawScreen(v, "nA",
-                          MeasurementState_ResultIsHard()
-                          ? "MODE:HARD" : "MODE:MEASURE");
-        }
+        MeasurementState_StartCommand();
+        OLED_DrawScreen("+0.000", "nA", "MODE1 RUN");
+        UART_SendString("START MODE1\r\n");
         Button_MeasurementDone();
       }
 #endif

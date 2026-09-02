@@ -26,6 +26,7 @@
 /* ---- 模式一 状态 ---- */
 static uint16_t voltage_buf[TOTAL_CYCLE];   /* 1 秒全部采样原始码, 12.5KB */
 static uint32_t sample_index;
+static uint32_t last_window_count;          /* 最近一个完整窗口的采样数 (单次测量完成后 B 指令取数用) */
 static uint32_t m_count;                    /* POS(升压方向) 施加周期数 */
 static uint32_t n_count;                    /* NEG(降压方向) 施加周期数 */
 volatile uint8_t finish_flag;
@@ -119,6 +120,7 @@ void Current_Start(void)
     m_count = 0;
     n_count = 0;
     sample_index = 0;
+    last_window_count = 0U;
     finish_flag = 0;
     sel_state = SEL_POS;        /* 默认输入正向标准电流 */
     hard_phase = HARD_IDLE;
@@ -187,9 +189,11 @@ void Current_Process(void)
 
         if (sample_index >= TOTAL_CYCLE)
         {
-            /* 窗口完成: 中断内先算结果, 再重置立刻开新窗 (连续模式, 不停 TIM6) */
+            /* 窗口完成: 中断内先算结果; 单次测量下主循环随后会停 TIM6,
+             * 完整窗口数据保留在电压缓冲里供 B 指令回传 */
             window_current = Calculate_Current();
             finish_flag = 1;
+            last_window_count = TOTAL_CYCLE;
             sample_index = 0;
             m_count = 0;
             n_count = 0;
@@ -339,7 +343,8 @@ uint16_t Current_GetSample(uint32_t index)
 
 uint32_t Current_GetSampleCount(void)
 {
-    return sample_index;
+    /* 窗口进行中返回实时计数; 完成后 (sample_index 已归零) 返回完整窗口 6250 */
+    return (sample_index > 0U) ? sample_index : last_window_count;
 }
 
 /* 1s 窗口内积分器电压峰峰值 (bang-bang 摆幅, V) */

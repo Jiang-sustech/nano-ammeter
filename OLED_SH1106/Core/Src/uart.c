@@ -112,7 +112,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     switch (rx_byte)
     {
     case 'S': case 's': cmd = 'S'; break;
-    case 'X': case 'x': cmd = 'X'; break;
     case 'N': case 'n': cmd = 'N'; break;
     case 'D': case 'd': cmd = 'D'; break;
     case 'B': case 'b': cmd = 'B'; break;
