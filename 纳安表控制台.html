@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>纳安表控制台</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --dim: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --amber: #d29922;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    min-height: 100vh;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  header h1 { font-size: 1.6rem; font-weight: 600; }
+  header p { color: var(--dim); font-size: 0.9rem; margin-top: 4px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 20px;
+  }
+  .card h2 {
+    font-size: 0.85rem;
+    color: var(--dim);
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    margin-bottom: 12px;
+    text-transform: uppercase;
+  }
+
+  .conn-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--red); flex-shrink: 0; }
+  .dot.on { background: var(--green); animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(63,185,80,0.5); }
+    50%      { box-shadow: 0 0 0 8px rgba(63,185,80,0); }
+  }
+  #connState { font-size: 1rem; }
+  #portName { color: var(--dim); font-size: 0.85rem; }
+  .spacer { flex: 1; }
+  button {
+    font-family: inherit;
+    font-size: 1rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 18px;
+    cursor: pointer;
+    color: var(--text);
+    background: #21262d;
+    transition: all 0.15s;
+  }
+  button:hover { border-color: var(--accent); }
+  button:active { transform: translateY(1px); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.primary { background: #1f6feb; border-color: #1f6feb; }
+  button.primary:hover { background: #2f81f7; }
+
+  .ctrl-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .ctrl-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 26px 10px;
+    font-size: 1.25rem;
+    font-weight: 600;
+    border-radius: 12px;
+  }
+  .ctrl-btn .icon { font-size: 2rem; }
+  .ctrl-btn .hint { font-size: 0.75rem; color: var(--dim); font-weight: 400; }
+  #btnStart  { background: rgba(63,185,80,0.12);  border-color: var(--green); color: var(--green); }
+  #btnStart:hover  { background: rgba(63,185,80,0.25); }
+  #btnStop   { background: rgba(248,81,73,0.12);  border-color: var(--red);   color: var(--red); }
+  #btnStop:hover   { background: rgba(248,81,73,0.25); }
+  #btnNoise  { background: rgba(210,153,34,0.12); border-color: var(--amber); color: var(--amber); }
+  #btnNoise:hover  { background: rgba(210,153,34,0.25); }
+  .ctrl-btn:disabled { opacity: 0.3; }
+
+  .sub-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  #btnQuery { background: rgba(88,166,255,0.12); border-color: var(--accent); color: var(--accent); }
+  #btnWave  { background: rgba(88,166,255,0.12); border-color: var(--accent); color: var(--accent); }
+  #btnCsv { font-size: 0.85rem; padding: 6px 12px; }
+
+  #screenState {
+    font-size: 1.9rem;
+    font-weight: 700;
+    text-align: center;
+    padding: 14px 0;
+    letter-spacing: 0.04em;
+  }
+  #screenState.idle   { color: var(--dim); }
+  #screenState.run    { color: var(--green); }
+  #screenState.noise  { color: var(--amber); }
+  #lastRaw { text-align: center; color: var(--dim); font-size: 0.8rem; }
+
+  #log {
+    height: 200px;
+    overflow-y: auto;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 0.82rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  #log .tx { color: var(--accent); }
+  #log .rx { color: var(--green); }
+  #log .err { color: var(--red); }
+  #log .sys { color: var(--dim); }
+  #log .ts { color: var(--dim); margin-right: 6px; }
+
+  #waveCanvas {
+    width: 100%;
+    height: 220px;
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    display: none;
+  }
+  #waveInfo { color: var(--dim); font-size: 0.8rem; margin-top: 8px; display: none; }
+
+  .send-row { display: flex; gap: 10px; }
+  .send-row input {
+    flex: 1;
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: Consolas, monospace;
+    font-size: 1rem;
+    padding: 10px 14px;
+  }
+  .send-row input:focus { outline: none; border-color: var(--accent); }
+
+  footer { color: var(--dim); font-size: 0.78rem; line-height: 1.7; }
+  footer b { color: var(--text); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>纳安表控制台 <span style="color:var(--dim);font-weight:400">Nano-Ammeter Console</span></h1>
+  <p>电荷平衡微弱电流测量仪 · 点击按钮即可控制板载测量</p>
+</header>
+
+<!-- 连接 -->
+<div class="card">
+  <h2>串口连接</h2>
+  <div class="conn-row">
+    <span class="dot" id="connDot"></span>
+    <span id="connState">未连接</span>
+    <span id="portName"></span>
+    <span class="spacer"></span>
+    <button id="btnConnect" class="primary">🔌 连接串口</button>
+    <button id="btnDisconnect" disabled>断开</button>
+  </div>
+  <div id="diag" style="margin-top:10px;font-size:0.85rem;color:#8b949e;">诊断中…（若停留在此状态 = 页面缓存旧版或脚本未运行）</div>
+</div>
+
+<!-- 控制 -->
+<div class="card">
+  <h2>测量控制</h2>
+  <div class="ctrl-grid">
+    <button class="ctrl-btn" id="btnStart" disabled>
+      <span class="icon">▶</span>启动测量
+      <span class="hint">指令 S · 快捷键 S</span>
+    </button>
+    <button class="ctrl-btn" id="btnStop" disabled>
+      <span class="icon">■</span>停止测量
+      <span class="hint">指令 X · 快捷键 X</span>
+    </button>
+    <button class="ctrl-btn" id="btnNoise" disabled>
+      <span class="icon">∿</span>底噪标定
+      <span class="hint">指令 N · 50 秒</span>
+    </button>
+  </div>
+  <div class="sub-grid" style="margin-top:14px">
+    <button id="btnQuery" disabled>🔎 查询最近结果（D）</button>
+    <button id="btnWave" disabled>📈 下载最近窗口波形（B）</button>
+  </div>
+</div>
+
+<!-- 状态 -->
+<div class="card">
+  <h2>仪器状态</h2>
+  <div id="screenState" class="idle">—— 等待连接 ——</div>
+  <div id="lastRaw"></div>
+</div>
+
+<!-- 波形 -->
+<div class="card">
+  <h2>最近窗口原始波形 <button id="btnCsv" disabled style="float:right">导出 CSV</button></h2>
+  <canvas id="waveCanvas"></canvas>
+  <div id="waveInfo"></div>
+</div>
+
+<!-- 日志 -->
+<div class="card">
+  <h2>通信日志</h2>
+  <div id="log"><span class="sys">控制台就绪。连接串口后即可控制仪器。</span></div>
+</div>
+
+<!-- 手动发送 -->
+<div class="card">
+  <h2>手动指令</h2>
+  <div class="send-row">
+    <input id="cmdInput" placeholder="输入指令: S / X / N / D / B" maxlength="64">
+    <button id="btnSend" disabled>发送</button>
+  </div>
+</div>
+
+<footer>
+  <b>使用说明：</b>① 打开台式电源给板子供电 → ② 板载 USB-C 插到电脑 → ③ 本页用 <b>Chrome / Edge</b> 打开 → ④ 点「连接串口」选 CH340 (COM 口) → ⑤ 点按钮控制测量。<br>
+  <b>注意：</b>烧录固件用 ST-Link；本页只负责控制与数据回传（115200 8N1）。串口助手不能与本页同时占用同一 COM 口。快捷键 S / X / N 与按钮等效（输入框聚焦时除外）。
+</footer>
+
+<script>
+const CH340_FILTER = [{ usbVendorId: 0x1A86, usbProductId: 0x7523 }];
+const BAUD = { baudRate: 115200, dataBits: 8, stopBits: 1, parity: 'none' };
+
+/* 滞回阈值 (码域, 与固件一致): 0.131V 和 2.969V -> 3.3V/65536 */
+const CODE_LOWER = Math.round(0.131 / 3.3 * 65536);
+const CODE_UPPER = Math.round(2.969 / 3.3 * 65536);
+
+let port = null;
+let writer = null;
+let rxBuf = '';
+let waveMode = null;   /* 二进制接收状态: {need, bytes} */
+let waveData = null;   /* 最近一次波形 Uint16Array */
+const decoder = new TextDecoder('stream');
+
+const $ = id => document.getElementById(id);
+const logEl = $('log');
+
+function now() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function log(msg, cls = 'sys') {
+  const div = document.createElement('div');
+  div.innerHTML = `<span class="ts">[${now()}]</span><span class="${cls}">${escapeHtml(msg)}</span>`;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function setConnected(on, name) {
+  $('connDot').classList.toggle('on', on);
+  $('connState').textContent = on ? '已连接' : '未连接';
+  $('portName').textContent = on ? (name || '') : '';
+  $('btnConnect').disabled = on;
+  $('btnDisconnect').disabled = !on;
+  $('btnStart').disabled = !on;
+  $('btnStop').disabled = !on;
+  $('btnNoise').disabled = !on;
+  $('btnQuery').disabled = !on;
+  $('btnWave').disabled = !on;
+  $('btnSend').disabled = !on;
+  if (!on) {
+    $('screenState').className = 'idle';
+    $('screenState').textContent = '—— 未连接 ——';
+    $('lastRaw').textContent = '';
+  }
+}
+
+/* 状态解析: 固件上报协议
+ *   NANO-AMMETER READY / START MODE1 / STOP IDLE
+ *   I=+12.345 nA MODE=1/2   (每秒自动上报)
+ *   MODE2 START (I<1nA)     (模式二自动进入)
+ *   NOISE START (50s) / NOISE 10/50s / IBIAS=+123.4 fA
+ *   RESULT I=... MODE=..    (D 查询) */
+function setStatus(raw) {
+  $('lastRaw').textContent = raw;
+  const el = $('screenState');
+  const m = raw.match(/I=([+-][0-9]+\.[0-9]+) nA MODE=(\d)/);
+  if (m) {
+    el.textContent = `${m[1]} nA`;
+    el.className = 'run';
+    return;
+  }
+  const b = raw.match(/IBIAS=([+-][0-9]+\.[0-9]+) fA/);
+  if (b) { el.textContent = `偏置 ${b[1]} fA`; el.className = 'noise'; return; }
+  if (raw.includes('MODE2 START')) { el.textContent = '模式二运行中（双斜率）'; el.className = 'run'; return; }
+  if (raw.includes('NOISE START')) { el.textContent = '底噪标定中'; el.className = 'noise'; return; }
+  if (/NOISE \d+\/50s/.test(raw)) { el.textContent = raw; el.className = 'noise'; return; }
+  if (raw.includes('STOP IDLE')) { el.textContent = '已停止'; el.className = 'idle'; return; }
+  if (raw.includes('START MODE1')) { el.textContent = '模式一运行中'; el.className = 'run'; return; }
+  if (raw.includes('READY')) { el.textContent = '仪器在线'; el.className = 'run'; return; }
+  if (raw.startsWith('RESULT')) {
+    const rm = raw.match(/I=([+-][0-9]+\.[0-9]+) nA MODE=(\d)/);
+    if (rm) { el.textContent = `${rm[1]} nA（模式${rm[2]}）`; el.className = 'run'; }
+    else if (raw.includes('NONE')) { el.textContent = '暂无结果'; el.className = 'idle'; }
+    return;
+  }
+  if (raw.includes('WARN')) { el.textContent = raw; el.className = 'noise'; }
+}
+
+/* 文本行处理 */
+function onTextLine(t) {
+  if (!t) return;
+  log('← ' + t, 'rx');
+  setStatus(t);
+  /* B 回传头: WAVE <count> -> 进入二进制接收 */
+  const wm = t.match(/^WAVE (\d+)/);
+  if (wm) {
+    const count = parseInt(wm[1], 10);
+    if (count > 0) {
+      waveMode = { need: count * 2 + 2, bytes: [] };
+      log(`开始接收波形: ${count} 点 ...`, 'sys');
+    }
+  }
+}
+
+/* 二进制波形接收 + 绘图 */
+function onWaveComplete() {
+  const all = waveMode.bytes;
+  const count = (all.length - 2) / 2;
+  const data = new Uint16Array(count);
+  for (let i = 0; i < count; i++) data[i] = all[i*2] | (all[i*2+1] << 8);
+  /* 校验和 (u16 循环和) */
+  let sum = 0;
+  for (let i = 0; i < count; i++) sum = (sum + data[i]) & 0xFFFF;
+  const rxsum = all[all.length-2] | (all[all.length-1] << 8);
+  const ok = sum === rxsum;
+  waveData = data;
+  log(`波形接收完成: ${count} 点, 校验和 ${ok ? 'OK ✓' : '失败 ✗ (期望 ' + rxsum.toString(16) + ' 实际 ' + sum.toString(16) + ')'}`, ok ? 'rx' : 'err');
+  drawWave();
+  $('btnCsv').disabled = false;
+  $('waveInfo').textContent =
+    `${count} 点 × 160µs ≈ ${(count*0.16).toFixed(0)} ms · 阈值线: code_lower=${CODE_LOWER} (0.131V), code_upper=${CODE_UPPER} (2.969V)`;
+  $('waveInfo').style.display = 'block';
+}
+
+function drawWave() {
+  const cv = $('waveCanvas');
+  const w = cv.clientWidth || 800, h = 220;
+  cv.width = w * devicePixelRatio;
+  cv.height = h * devicePixelRatio;
+  cv.style.width = w + 'px';
+  cv.style.height = h + 'px';
+  cv.style.display = 'block';
+  const ctx = cv.getContext('2d');
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+  ctx.fillStyle = '#0d1117';
+  ctx.fillRect(0, 0, w, h);
+
+  const n = waveData.length;
+  if (!n) return;
+
+  let vmin = 65535, vmax = 0;
+  for (let i = 0; i < n; i++) {
+    const v = waveData[i];
+    if (v < vmin) vmin = v;
+    if (v > vmax) vmax = v;
+  }
+  const pad = (vmax - vmin) * 0.1 || 1;
+  vmin -= pad; vmax += pad;
+
+  /* 阈值虚线 */
+  ctx.strokeStyle = 'rgba(210,153,34,0.6)';
+  ctx.setLineDash([5, 5]);
+  [CODE_LOWER, CODE_UPPER].forEach(th => {
+    const y = h - (th - vmin) / (vmax - vmin) * h;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+  });
+  ctx.setLineDash([]);
+
+  /* 波形 */
+  ctx.strokeStyle = '#3fb950';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const x = i / (n - 1) * w;
+    const y = h - (waveData[i] - vmin) / (vmax - vmin) * h;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+function onChunk(chunk) {
+  /* 二进制模式优先 */
+  if (waveMode) {
+    for (const b of chunk) {
+      waveMode.bytes.push(b);
+      if (waveMode.bytes.length >= waveMode.need) {
+        const rest = chunk.slice(chunk.length - (waveMode.bytes.length - waveMode.need));
+        waveMode = null;
+        onWaveComplete();
+        onChunkText(new TextDecoder().decode(rest));
+        return;
+      }
+    }
+    return;
+  }
+  onChunkText(decoder.decode(chunk, { stream: true }));
+}
+
+function onChunkText(text) {
+  rxBuf += text;
+  const lines = rxBuf.split(/\r?\n/);
+  rxBuf = lines.pop();
+  for (const line of lines) onTextLine(line.trim());
+}
+
+async function readLoop() {
+  const currentPort = port;
+  try {
+    const reader = currentPort.readable.getReader();
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      onChunk(value);
+    }
+  } catch (e) { /* 设备断开 */ }
+  if (port === currentPort) {
+    port = null;
+    setConnected(false);
+    log('串口已断开', 'err');
+  }
+}
+
+async function send(cmd) {
+  if (!port || !port.writable) { log('未连接，无法发送', 'err'); return; }
+  try {
+    if (!writer) writer = port.writable.getWriter();
+    await writer.write(new TextEncoder().encode(cmd + '\n'));
+    log('→ ' + cmd, 'tx');
+  } catch (e) {
+    log('发送失败: ' + e.message, 'err');
+  }
+}
+
+async function connect() {
+  if (!('serial' in navigator)) {
+    log('当前浏览器不支持 Web Serial，请使用 Chrome 或 Edge 打开本页', 'err');
+    return;
+  }
+  let p;
+  try {
+    p = await navigator.serial.requestPort(CH340_FILTER);
+  } catch (e) {
+    if (e.name !== 'NotFoundError') log('选择串口失败: ' + e.message, 'err');
+    /* 过滤条件匹配不到时, 不加过滤再试一次 (显示所有可用串口) */
+    try {
+      log('按过滤条件未找到 CH340, 改为列出所有串口 ...', 'sys');
+      p = await navigator.serial.requestPort();
+    } catch (e2) {
+      if (e2.name !== 'NotFoundError') log('选择串口失败: ' + e2.message, 'err');
+      return;
+    }
+  }
+  try {
+    await p.open(BAUD);
+  } catch (e) {
+    log('打开串口失败（可能被串口助手占用）: ' + e.message, 'err');
+    return;
+  }
+  port = p;
+  setConnected(true, port.getInfo().usbProductId ? 'CH340' : '');
+  log(`已连接 CH340, 115200 8N1`, 'sys');
+  readLoop();
+}
+
+async function disconnect() {
+  if (writer) { try { writer.releaseLock(); } catch(_){} writer = null; }
+  if (port) { try { await port.close(); } catch(_){} port = null; }
+  setConnected(false);
+  log('已主动断开', 'sys');
+}
+
+navigator.serial?.addEventListener('disconnect', e => {
+  if (e.target === port) {
+    port = null;
+    setConnected(false);
+    log('设备已拔出', 'err');
+  }
+});
+
+$('btnConnect').onclick = connect;
+$('btnDisconnect').onclick = disconnect;
+$('btnStart').onclick = () => send('S');
+$('btnStop').onclick = () => send('X');
+$('btnNoise').onclick = () => send('N');
+$('btnQuery').onclick = () => send('D');
+$('btnWave').onclick = () => { $('btnCsv').disabled = true; send('B'); };
+$('btnCsv').onclick = () => {
+  if (!waveData) return;
+  let csv = 'index,code\n';
+  for (let i = 0; i < waveData.length; i++) csv += `${i},${waveData[i]}\n`;
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `nano_wave_${Date.now()}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+$('btnSend').onclick = () => {
+  const inp = $('cmdInput');
+  const v = inp.value.trim();
+  if (!v) return;
+  send(v);
+  inp.value = '';
+};
+$('cmdInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') $('btnSend').click();
+});
+
+document.addEventListener('keydown', e => {
+  if (!port) return;
+  const tag = document.activeElement?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+  const k = e.key.toUpperCase();
+  if (k === 'S') $('btnStart').click();
+  else if (k === 'X') $('btnStop').click();
+  else if (k === 'N') $('btnNoise').click();
+});
+
+log('控制台就绪。连接串口后即可控制仪器。', 'sys');
+
+/* 自检横幅: 浏览器/上下文是否支持 Web Serial */
+(function diag() {
+  const d = $('diag');
+  if (!('serial' in navigator)) {
+    d.innerHTML = '❌ <b>当前浏览器不支持 Web Serial</b> —— 请用 <b>Chrome 或 Edge 最新版</b>打开本页';
+    d.style.color = 'var(--red)';
+    return;
+  }
+  if (window.isSecureContext === false) {
+    d.innerHTML = '⚠️ 非安全上下文 —— 请通过 http://localhost:8000 或 https 访问本页';
+    d.style.color = 'var(--amber)';
+    return;
+  }
+  d.innerHTML = '✅ Web Serial 可用 · ' + escapeHtml(navigator.userAgent.slice(0, 80));
+  d.style.color = 'var(--green)';
+})();
+</script>
+</body>
+</html>

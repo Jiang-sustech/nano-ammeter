@@ -6,41 +6,72 @@
 
 | 目录 | 说明 |
 |------|------|
-| `Version1/` | 正式版固件（STM32L431CCT6 + CubeMX/CMake 工程） |
+| `OLED_SH1106/` | **合并版固件（当前正式版）**：测量状态机 + 屏幕显示 + 串口控制/数据回传，硬件验证通过 |
+| `纳安表控制台.html` | 演示用网页控制台（Web Serial API，Chrome/Edge 打开即可用） |
+| `Version1/` | 早期正式版固件（测量核心出处，旧显示驱动） |
 | `SawtoothTest/` | 锯齿波独立测试工程（上电自动 bang-bang，验证参考电流通路） |
+| `tools/` | `uart_flash.py` 串口烧录器（AN3155 Bootloader）+ SWD 调试 TCL 脚本 |
 
 ## 硬件架构
 
 - **MCU**: STM32L431CCT6（MSI 48MHz → PLL 80MHz）
 - **模拟前端**: ADA4530 积分器（C=30pF）+ ADG1219 参考开关（±5V / 100MΩ = ±50nA）
 - **电平移位**: OPA735 反相求和器，`V_ad = 1.55 − 0.33·V_o`（V_o=±4.5V → 0.065~3.035V）
-- **采集**: PA3 12-bit ADC（可切换 ADS8866 16-bit 外部 ADC）
-- **显示**: SH1106 1.3" OLED（SPI2）
+- **采集**: PA3 12-bit 内置 ADC（ADC 时钟 = SYSCLK 80MHz；ADS8866 16-bit 路径备用，宏切换）
+- **显示**: SH1106 1.3" OLED（SPI2，SH1106-master 驱动）
+- **串口**: 板载 CH340G（USB-C），USART1 PA9/PA10，115200 8N1
 
-## 测量原理
+## 测量流程
 
-1. **模式一：滞回电荷平衡**（连续 1s 窗口，±4.3V 滞回，160µs 节拍）
+1. **空闲**: ADG 关断（不注入参考电流），屏幕 `MODE:IDLE`，等待指令
+2. **模式一**（滞回电荷平衡，160µs 节拍，1s 窗口）：串口 `S` 启动；
    `I = C·(Vo1−Vo2)/(N·T) − (m·I₊ + n·I₋)/N`
-2. **模式二：双斜率硬积分**（I < 1nA 自动进入，10s 内多循环取平均）
-3. **底噪标定**：ADG 全断纯积分 + 最小二乘拟合 `I_bias = C·dV/dt`
+3. **模式二**（双斜率硬积分）：模式一结果 < 1nA 自动进入，10s 多循环取平均，
+   完成后自动回到模式一
+4. **底噪标定**：串口 `N`（50s 纯积分，最小二乘拟合 `I_bias = C·dV/dt`）
 
-## 控制方式
+## 串口协议（115200 8N1）
 
-- 串口指令：`S` = 启动测量，`X` = 停止测量
-- 按键 PB4：短按 = 启动/刷新显示，长按 = 底噪标定
-- SWD 直读：`voltage_buf`(6250 点原始采样)、`window_current`(每秒结果)
+| 指令 | 功能 | 响应 |
+|------|------|------|
+| `S` | 启动测量 | `START MODE1` |
+| `X` | 停止测量 | `STOP IDLE` |
+| `N` | 底噪标定（50s） | `NOISE START (50s)` + 每 10s 进度 + `IBIAS=+xx.x fA` |
+| `D` | 查询最近结果 | `RESULT I=+12.345 nA MODE=1` |
+| `B` | 回传当前窗口波形 | `WAVE <count>` + count×2 字节小端 u16 + 2 字节校验和 |
+| 自动 | 模式一每秒窗口结束 | `I=+12.345 nA MODE=1` |
+| 自动 | <1nA 切模式二 | `MODE2 START (I<1nA)` |
+
+指令大小写不敏感，行结束符忽略；按键功能已全部关闭（PB4 硬件故障），控制一律走串口/HTML 控制台。
 
 ## 构建
 
 ```
-cmake -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
+cmake --preset Debug
+cmake --build build/Debug
 ```
 
-工具链：`C:/Users/40512/STM32Toolchain`（arm-none-eabi GCC 14.3.1 + CMake 4.3.1 + Ninja）
+工具链：STM32Toolchain（arm-none-eabi GCC + CMake + Ninja）。
+烧录：ST-Link + OpenOCD（`interface/stlink-v2-1.cfg`，克隆调试器必须用此文件），
+或 `tools/uart_flash.py`（BOOT0 拉高复位进系统 Bootloader）。
+
+## 重要工程记录（踩过的坑）
+
+1. **ADC 时钟必须用 SYSCLK**（80MHz，L431 fADC 上限内）。本工程 HAL 版本对 L431 的
+   PLLSAI1 配置路径有缺陷（L431 PLLSAI1 无 M 分频器，HAL 写出非法配置且不使能），
+   会导致 ADC 无时钟、转换永不完成。
+2. **中断内 ADC 轮询不能依赖 HAL_GetTick**：TIM6 中断与 SysTick 同优先级时 tick 饿死，
+   HAL 超时轮询变死循环。`ads8866.c` 已改为寄存器级轮询 + 计数保护。
+3. **L4 校准函数会关掉 ADC**（ADEN=0），寄存器级读取前需重新使能。
+4. **电平移位反相映射**（论文确认）：`V_ad = 1.55 − 0.33·V_o`，
+   滞回阈值码: code_lower=0.131V↔V_o=+4.3V, code_upper=2.969V↔V_o=−4.3V。
 
 ## 已知问题
 
-- OLED 模块损坏待换新
-- 板上 U3 开关区域疑似锡桥（U3.5↔U3.6）+ EN 走线断，待修复后验证锯齿波
-- ADS8866 路径的 AINP/AINN 接线疑似反接（PA3 路径不受影响）
+- 模拟前端未修复：积分器钉在 +4.5V 正轨（C16 30pF 直插电容/ADA4530 待查），
+  当前测出电流恒为 0，修好后才有真实测量值与锯齿波
+- ADS8866 的 AINP/AINN 在板上接反（内置 ADC 路径不受影响；修好后把
+  `ads8866.c` 的 `USE_MCU_ADC` 改为 0 可切 16 位）
+- PB4 按键硬件故障（恒读低），按键功能已全部禁用
+- BOOT0 按键焊点不良，串口烧录需飞线 BOOT0→3V3 + 复位
+- 板载 CH340 的 USB-C 线易松脱（串口掉线先查线）
