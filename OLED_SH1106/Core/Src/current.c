@@ -2,13 +2,11 @@
 #include "ads8866.h"
 #include "adg4530.h"
 #include "tim.h"
+#include "cal_mode.h"
 #include <math.h>
 
-/* ---- 硬件常量 (沿用现有参数, 硬件改动需同步) ---- */
-#define C_INT        30e-12f    /* 积分电容 */
+/* ---- 硬件常量 (C_INT/I_POS_REF/I_NEG_REF 已上移到 current.h 供标定模块共用) ---- */
 #define T_INT        160e-6f    /* 积分周期 (TIM6 160us) */
-#define I_POS        50e-9f     /* 正向参考电流 */
-#define I_NEG        (-50e-9f)  /* 负向参考电流 */
 #define TOTAL_CYCLE  6250U      /* 1 秒窗口总采样数 */
 
 /* ADC 域阈值电压 (反相映射: V_ad = 1.55 - 0.33*V_o)
@@ -27,6 +25,7 @@
 static uint16_t voltage_buf[TOTAL_CYCLE];   /* 1 秒全部采样原始码, 12.5KB */
 static uint32_t sample_index;
 static uint32_t last_window_count;          /* 最近一个完整窗口的采样数 (单次测量完成后 B 指令取数用) */
+static uint32_t last_m, last_n;             /* 最近完整窗口的 POS/NEG 周期数 (标定用) */
 static uint32_t m_count;                    /* POS(升压方向) 施加周期数 */
 static uint32_t n_count;                    /* NEG(降压方向) 施加周期数 */
 volatile uint8_t finish_flag;
@@ -121,6 +120,8 @@ void Current_Start(void)
     n_count = 0;
     sample_index = 0;
     last_window_count = 0U;
+    last_m = 0U;
+    last_n = 0U;
     finish_flag = 0;
     sel_state = SEL_POS;        /* 默认输入正向标准电流 */
     hard_phase = HARD_IDLE;
@@ -194,6 +195,8 @@ void Current_Process(void)
             window_current = Calculate_Current();
             finish_flag = 1;
             last_window_count = TOTAL_CYCLE;
+            last_m = m_count;
+            last_n = n_count;
             sample_index = 0;
             m_count = 0;
             n_count = 0;
@@ -345,6 +348,48 @@ uint32_t Current_GetSampleCount(void)
 {
     /* 窗口进行中返回实时计数; 完成后 (sample_index 已归零) 返回完整窗口 6250 */
     return (sample_index > 0U) ? sample_index : last_window_count;
+}
+
+uint32_t Current_GetMCount(void)
+{
+    return last_m;
+}
+
+uint32_t Current_GetNCount(void)
+{
+    return last_n;
+}
+
+/* 最近窗口的最小/最大码 = 下/上阈值切换点 (标定用);
+ * 主循环内遍历 (与中断写入存在弱竞态, 极值采样在缓冲中停留远长于遍历耗时, 可接受) */
+uint16_t Current_GetMinCode(void)
+{
+    uint16_t vmin = 0xFFFFU;
+    uint32_t i;
+
+    for (i = 0U; i < TOTAL_CYCLE; i++)
+    {
+        if (voltage_buf[i] < vmin)
+        {
+            vmin = voltage_buf[i];
+        }
+    }
+    return vmin;
+}
+
+uint16_t Current_GetMaxCode(void)
+{
+    uint16_t vmax = 0U;
+    uint32_t i;
+
+    for (i = 0U; i < TOTAL_CYCLE; i++)
+    {
+        if (voltage_buf[i] > vmax)
+        {
+            vmax = voltage_buf[i];
+        }
+    }
+    return vmax;
 }
 
 /* 1s 窗口内积分器电压峰峰值 (bang-bang 摆幅, V) */
@@ -628,6 +673,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
     if (htim->Instance == TIM6)
     {
+#if CAL_MODE == CAL_NONE
         Current_Process();
+#else
+        CalMode_Tick();     /* 标定固件: 节拍路由到标定逻辑 */
+#endif
     }
 }

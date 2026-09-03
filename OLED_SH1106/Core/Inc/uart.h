@@ -21,4 +21,8 @@ char UART_GetCommand(void);             /* 消费式读取指令, 无指令返�
 void UART_SendString(const char *str);  /* ASCII 文本发送 */
 void UART_SendBinary(const uint8_t *data, uint16_t len);  /* 二进制数据发送 */
 
+/* 定点十进制格式化: value/10^decimals, 带符号, 如 (12345,3) -> "+12.345"
+ * (避免浮点 printf, 全局共享工具) */
+void UART_FormatScaled(int64_t value, uint8_t decimals, char *buf);
+
 #endif /* __UART_H */

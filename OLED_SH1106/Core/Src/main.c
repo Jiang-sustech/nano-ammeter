@@ -23,6 +23,7 @@
 #include "button.h"
 #include "current.h"
 #include "measurement_state.h"
+#include "cal_mode.h"
 #include <stdio.h>
 /* USER CODE END Includes */
 
@@ -42,7 +43,6 @@ void SystemClock_Config(void);
 static void Measurement_Task(void);
 static void Noise_Task(void);
 static void OLED_DrawScreen(const char *value, const char *unit, const char *mode);
-static void FormatScaled(int64_t value, uint8_t decimals, char *buf);
 static void FormatCurrentNA(float current, char *buf);
 static void UART_SendResultLine(float current, uint8_t mode);
 static void UART_SendResultQuery(void);
@@ -65,59 +65,13 @@ static void OLED_DrawScreen(const char *value, const char *unit, const char *mod
     SH1106_Flush();
 }
 
-/* 定点十进制格式化: value / 10^decimals, 带符号, 如 (12345,3) -> "+12.345"
- * 避免浮点 printf (nano 库默认不带 _printf_float) */
-static void FormatScaled(int64_t value, uint8_t decimals, char *buf)
-{
-    char digits[24];
-    int idx = 0;
-    int64_t v;
-    uint8_t n = 0;
-    char *p = buf;
-
-    if (value < 0)
-    {
-        *p++ = '-';
-        v = -value;
-    }
-    else
-    {
-        *p++ = '+';
-        v = value;
-    }
-
-    do
-    {
-        digits[idx++] = (char)('0' + (v % 10));
-        v /= 10;
-        n++;
-    } while (v > 0);
-
-    /* 不足 decimals+1 位则补前导零 */
-    while (n <= decimals)
-    {
-        digits[idx++] = '0';
-        n++;
-    }
-
-    while (idx > 0)
-    {
-        *p++ = digits[--idx];
-        if (decimals > 0 && idx == decimals)
-        {
-            *p++ = '.';
-        }
-    }
-    *p = '\0';
-}
-
 /* 电流 -> nA 3 位小数文本 (单位 0.001 nA) */
 static void FormatCurrentNA(float current, char *buf)
 {
     double v = (double)current * 1e12;
     if (v > 9.0e18) v = 9.0e18;
     if (v < -9.0e18) v = -9.0e18;
-    FormatScaled((int64_t)v, 3, buf);
+    UART_FormatScaled((int64_t)v, 3, buf);
 }
 
 /* 结果上报: "I=+12.345 nA MODE=1" */
@@ -220,8 +174,21 @@ int main(void)
   UART_Init_RX();
   MeasurementState_Init();
 
+#if CAL_MODE != CAL_NONE
+  /* ---- 标定固件: 专属主流程 (正常固件 CAL_MODE=CAL_NONE 不编译) ---- */
+  OLED_DrawScreen("+0.000", "nA", (CAL_MODE == CAL_ZERO) ? "CAL ZERO" : "CAL BANG");
+  UART_SendString((CAL_MODE == CAL_ZERO)
+                  ? "CAL ZERO START (10s cycles)\r\n"
+                  : "CAL BANG START (1s windows)\r\n");
+  CalMode_Start();
+  while (1)
+  {
+    CalMode_Task();
+  }
+#else
   OLED_DrawScreen("+0.000", "nA", "MODE:IDLE");
   UART_SendString("NANO-AMMETER READY\r\n");
+#endif
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -405,7 +372,7 @@ static void Noise_Task(void)
     char line[48];
 
     ibias = Noise_GetBiasCurrent();
-    FormatScaled((int64_t)((double)ibias * 1e15), 1, fb);   /* fA 1 位小数 */
+    UART_FormatScaled((int64_t)((double)ibias * 1e15), 1, fb);   /* fA 1 位小数 */
 
     sprintf(line, "IBIAS=%s fA\r\n", fb);
     UART_SendString(line);

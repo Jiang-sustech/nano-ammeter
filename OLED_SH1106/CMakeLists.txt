@@ -54,6 +54,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/adc.c
     Core/Src/tim.c
     Core/Src/button.c
+    Core/Src/cal_mode.c
 )
 
 # Add include paths

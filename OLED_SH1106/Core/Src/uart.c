@@ -100,6 +100,50 @@ void UART_SendBinary(const uint8_t *data, uint16_t len)
     HAL_UART_Transmit(&huart1, (uint8_t *)data, len, 5000);
 }
 
+/* 定点十进制格式化 (共享工具, 避免浮点 printf) */
+void UART_FormatScaled(int64_t value, uint8_t decimals, char *buf)
+{
+    char digits[24];
+    int idx = 0;
+    int64_t v;
+    uint8_t n = 0;
+    char *p = buf;
+
+    if (value < 0)
+    {
+        *p++ = '-';
+        v = -value;
+    }
+    else
+    {
+        *p++ = '+';
+        v = value;
+    }
+
+    do
+    {
+        digits[idx++] = (char)('0' + (v % 10));
+        v /= 10;
+        n++;
+    } while (v > 0);
+
+    while (n <= decimals)
+    {
+        digits[idx++] = '0';
+        n++;
+    }
+
+    while (idx > 0)
+    {
+        *p++ = digits[--idx];
+        if (decimals > 0 && idx == decimals)
+        {
+            *p++ = '.';
+        }
+    }
+    *p = '\0';
+}
+
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     char cmd = 0;

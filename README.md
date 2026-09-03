@@ -57,6 +57,26 @@ cmake --build build/Debug
 烧录：ST-Link + OpenOCD（`interface/stlink-v2-1.cfg`，克隆调试器必须用此文件），
 或 `tools/uart_flash.py`（BOOT0 拉高复位进系统 Bootloader）。
 
+## 分模块标定（编译期宏，cal_mode.h）
+
+标定固件与正常固件共用工程，通过 `cal_mode.h` 中 `CAL_MODE` 宏切换：
+
+| 宏值 | 模式 | 行为 | 用途 |
+|------|------|------|------|
+| `CAL_NONE` | 正常测量 | 单次测量流程（默认） | 日常固件 |
+| `CAL_ZERO` | 零位检查 | ADG 全断，采样 10s/轮，自动循环上报 `CAL ZERO: N=… MEAN=… Vadc=…V STD=… DRIFT=…uV/s IB=…fA` | 校验 1.55V 偏移、噪声水平、偏置电流 |
+| `CAL_BANG` | 无输入 bang-bang | 模式一连续窗口，每秒上报 `CAL BANG: m=… n=… VPP=…V MIN=… MAX=… I=…nA` | 波峰波谷码 = 切换阈值点；配万用表 min/max 实测电压 → 传递函数两点标定 |
+
+**标定流程建议**：
+1. CAL_ZERO：V_adc 应为 1.55V（码 ≈30787），STD 反映噪声，DRIFT/IB 给偏置电流
+2. CAL_BANG（RF1 无输入）：MIN/MAX 码与万用表 min/max 电压配对 → 拟合真实
+   `V_adc = a + b·V_raw`，将实测值填入 `current.h` 的 `LEVELSHIFT_V_ADC_ZERO` / `LEVELSHIFT_GAIN`
+3. 参考电流/电容联合值由摆幅斜率给出：`I_ref/C = dV_raw/dt`（R9 单独测准后可解出 C，
+   填入 `current.h` 的 `C_INT` / `I_POS` / `I_NEG`）
+
+注意：固定电流斜坡不可用（50nA/30pF = 1.67V/ms，约 3ms 即撞轨），故用锯齿波
+波峰波谷作为天然阈值停靠点完成两点标定。
+
 ## 重要工程记录（踩过的坑）
 
 1. **ADC 时钟必须用 SYSCLK**（80MHz，L431 fADC 上限内）。本工程 HAL 版本对 L431 的

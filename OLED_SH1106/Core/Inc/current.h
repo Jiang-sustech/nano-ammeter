@@ -13,6 +13,11 @@
 #define LEVELSHIFT_GAIN        0.33f
 #define LEVELSHIFT_V_ADC_ZERO  1.55f    /* 积分器 0V 对应 ADC 电压 */
 
+/* 硬件常量 (计算与标定模块共用) */
+#define C_INT            30e-12f    /* 积分电容 (F) */
+#define I_POS            50e-9f     /* 正向参考电流 (A) */
+#define I_NEG           (-50e-9f)   /* 负向参考电流 (A) */
+
 /* 模式一 滞回阈值 (积分器域, 在 ±4.5V 线性区内) */
 #define THRESH_INT_UPPER    4.3f
 #define THRESH_INT_LOWER   (-4.3f)
@@ -33,6 +38,10 @@ float Current_GetWindowResult(void);   /* 上一窗口电流结果 (中断内算
 uint8_t Current_Is_Finished(void);     /* 兼容旧调用: 同 Current_WindowFinished */
 uint16_t Current_GetSample(uint32_t index); /* 调试: 读取存储的原始码 */
 uint32_t Current_GetSampleCount(void);      /* 当前窗口已采样数 (B 指令回传用) */
+uint32_t Current_GetMCount(void);           /* 最近完整窗口 POS 周期数 (标定用) */
+uint32_t Current_GetNCount(void);           /* 最近完整窗口 NEG 周期数 (标定用) */
+uint16_t Current_GetMinCode(void);          /* 最近窗口最小码 = 下阈值切换点 (标定用) */
+uint16_t Current_GetMaxCode(void);          /* 最近窗口最大码 = 上阈值切换点 (标定用) */
 float Current_GetSwingVoltage(void);   /* 1s 窗口内积分器电压峰峰值 (V) */
 float Current_GetNoiseVoltage(void);   /* 去趋势后每采样噪声 RMS (V) */
 
