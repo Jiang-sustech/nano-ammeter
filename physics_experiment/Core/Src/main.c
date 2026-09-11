@@ -2,6 +2,7 @@
 #include "adc.h"
 #include "tim.h"
 #include "current.h"
+#include "ads8866.h"
 
 void SystemClock_Config(void);
 
@@ -13,6 +14,9 @@ int main(void)
   MX_GPIO_Init();
   MX_ADC1_Init();
   MX_TIM6_Init();
+
+  /* 外部 16 位 ADC (SPI1) 初始化须在采样中断之前 */
+  ADS8866_Init();
 
   /* 启动 bang-bang (ADG 使能 + POS), TIM6 开始采样 */
   Current_Start();

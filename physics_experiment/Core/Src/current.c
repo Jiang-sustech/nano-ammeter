@@ -1,6 +1,7 @@
 #include "current.h"
 #include "main.h"
 #include "adc.h"
+#include "ads8866.h"
 
 /* ============================================================
  * 锯齿波测试: 滞回 bang-bang (±4.3V 阈值, 安全最高优先级)
@@ -23,6 +24,18 @@ static uint16_t voltage_buf[TOTAL_CYCLE];
 static volatile uint32_t sample_index;
 static volatile uint32_t m_count, n_count;
 
+#if USE_ADS8866_PARALLEL
+/* 同拍外部 ADC 采样 (与 voltage_buf 一一对应), 用于两条采集路径对比 */
+static uint16_t voltage_buf_ext[TOTAL_CYCLE];
+static volatile uint32_t ext_error_count;
+
+/* 诊断: 记录最近 16 次坏读的窗口内下标与原始值 (SWD 读取用) */
+#define EXT_ERR_LOG 16U
+static volatile uint32_t ext_err_idx[EXT_ERR_LOG];
+static volatile uint16_t ext_err_val[EXT_ERR_LOG];
+static volatile uint32_t ext_err_total;      /* 与 ext_error_count 同步, 仅用于对齐 */
+#endif
+
 #define SEL_POS 0U
 #define SEL_NEG 1U
 static volatile uint8_t sel_state;
@@ -42,19 +55,33 @@ static void ADG_Disable(void)  { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_R
 static void ADG_Select_Positive(void) { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_RESET); } /* A:+5V */
 static void ADG_Select_Negative(void) { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET); }   /* B:-5V */
 
-/* PA3 12 位读取 -> 16 位码域 */
+/* PA3 12 位读取 -> 16 位码域 (寄存器级, 160us 中断内不能走 HAL 阻塞轮询:
+ * HAL 超时依赖 HAL_GetTick, 而 SysTick 与 TIM6 同优先级会被饿死 -> 死锁) */
 static uint16_t ReadRaw(void)
 {
+    uint32_t guard;
     uint16_t raw;
 
-    HAL_ADC_Start(&hadc1);
-    if (HAL_ADC_PollForConversion(&hadc1, 10) != HAL_OK)
+    /* 标定后 HAL 会关掉 ADEN, 这里确保 ADC 处于使能就绪态 */
+    if ((ADC1->CR & ADC_CR_ADEN) == 0U)
     {
-        HAL_ADC_Stop(&hadc1);
+        ADC1->ISR = ADC_ISR_ADRDY;
+        ADC1->CR |= ADC_CR_ADEN;
+        guard = 200000U;
+        while (((ADC1->ISR & ADC_ISR_ADRDY) == 0U) && (guard-- > 0U)) { }
+    }
+
+    ADC1->ISR = ADC_ISR_EOC | ADC_ISR_OVR;   /* 清标志 */
+    ADC1->CR |= ADC_CR_ADSTART;
+
+    guard = 200000U;
+    while (((ADC1->ISR & ADC_ISR_EOC) == 0U) && (guard-- > 0U)) { }
+    if (guard == 0U)
+    {
         return 0U;
     }
-    raw = HAL_ADC_GetValue(&hadc1);
-    HAL_ADC_Stop(&hadc1);
+
+    raw = (uint16_t)ADC1->DR;
 
     return (uint16_t)((uint32_t)raw << 4);
 }
@@ -65,6 +92,9 @@ void Current_Start(void)
     n_count = 0;
     sample_index = 0;
     sel_state = SEL_POS;
+#if USE_ADS8866_PARALLEL
+    ext_error_count = 0;
+#endif
 
     code_upper = VToCode(V_ADC_UPPER);
     code_lower = VToCode(V_ADC_LOWER);
@@ -84,6 +114,24 @@ void Current_Process(void)
     }
 
     voltage_buf[sample_index] = raw;
+
+#if USE_ADS8866_PARALLEL
+    /* 同拍读外部 16 位 ADC (同一条 V_OUT 网络)。
+     * 全 0 / 全 1 视作读失败并计数: 0x0000 = 转换未完成,
+     * 0xFFFF = DOUT 恒高 (MISO 断线/OE 未开) */
+    {
+        uint16_t ext = ADS8866_ReadRaw();
+        voltage_buf_ext[sample_index] = ext;
+        if (ext == 0x0000U || ext == 0xFFFFU)
+        {
+            ext_error_count++;
+            ext_err_idx[ext_err_total % EXT_ERR_LOG] = sample_index;
+            ext_err_val[ext_err_total % EXT_ERR_LOG] = ext;
+            ext_err_total++;
+        }
+    }
+#endif
+
     sample_index++;
 
     /* 滞回 bang-bang (阈值永远生效):
@@ -130,3 +178,16 @@ uint16_t Current_GetSample(uint32_t index)
     }
     return voltage_buf[index];
 }
+
+#if USE_ADS8866_PARALLEL
+uint16_t Current_GetExtSample(uint32_t index)
+{
+    if (index >= TOTAL_CYCLE)
+    {
+        return 0U;
+    }
+    return voltage_buf_ext[index];
+}
+
+uint32_t Current_GetExtErrorCount(void) { return ext_error_count; }
+#endif

@@ -37,6 +37,10 @@ void MX_ADC1_Init(void)
   {
     Error_Handler();
   }
+
+  /* 单端校准 (标定后 HAL 会关闭 ADEN, 由 ReadRaw 负责重新使能);
+   * 失败不阻塞: 未校准时读数有几十码偏移, 波形形态仍可见 */
+  (void)HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
 }
 
 void HAL_ADC_MspInit(ADC_HandleTypeDef* adcHandle)
@@ -45,15 +49,12 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* adcHandle)
   RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
   if(adcHandle->Instance==ADC1)
   {
+    /* ADC 时钟 = SYSCLK (80MHz, 在 L431 fADC 上限 80MHz 之内, 数据手册 6.3.17).
+     * 不能用 PLLSAI1: 本 HAL 版本对 L431 的 PLLSAI1 路径有缺陷
+     * (L431 PLLSAI1 无 M 分频器, 该 HAL 写出非法配置且不使能 PLL,
+     *  导致 ADC 无时钟 -> 转换永不完成 -> 中断内轮询死锁, 采样恒为 0) */
     PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC;
-    PeriphClkInit.AdcClockSelection = RCC_ADCCLKSOURCE_PLLSAI1;
-    PeriphClkInit.PLLSAI1.PLLSAI1Source = RCC_PLLSOURCE_MSI;
-    PeriphClkInit.PLLSAI1.PLLSAI1M = 6;
-    PeriphClkInit.PLLSAI1.PLLSAI1N = 10;
-    PeriphClkInit.PLLSAI1.PLLSAI1P = RCC_PLLP_DIV7;
-    PeriphClkInit.PLLSAI1.PLLSAI1Q = RCC_PLLQ_DIV2;
-    PeriphClkInit.PLLSAI1.PLLSAI1R = RCC_PLLR_DIV4;
-    PeriphClkInit.PLLSAI1.PLLSAI1ClockOut = RCC_PLLSAI1_ADC1CLK;
+    PeriphClkInit.AdcClockSelection = RCC_ADCCLKSOURCE_SYSCLK;
     if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
     {
       Error_Handler();

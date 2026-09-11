@@ -9,7 +9,7 @@
 | `OLED_SH1106/` | **合并版固件（当前正式版）**：测量状态机 + 屏幕显示 + 串口控制/数据回传，硬件验证通过 |
 | `纳安表控制台.html` | 演示用网页控制台（Web Serial API，Chrome/Edge 打开即可用） |
 | `Version1/` | 早期正式版固件（测量核心出处，旧显示驱动） |
-| `SawtoothTest/` | 锯齿波独立测试工程（上电自动 bang-bang，验证参考电流通路） |
+| `physics_experiment/` | **实机验证版固件**：上电自动 bang-bang，积分器闭环 + 阈值 + 电平移位 + ADC 全链路跑通，实采到干净三角波；含 ADS8866 与内置 ADC 同拍并行采集 |
 | `tools/` | `uart_flash.py` 串口烧录器（AN3155 Bootloader）+ SWD 调试 TCL 脚本 |
 
 ## 硬件架构
