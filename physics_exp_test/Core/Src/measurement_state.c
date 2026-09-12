@@ -76,6 +76,12 @@ MeasurementProcessResult MeasurementState_Process(void)
         HAL_TIM_Base_Stop_IT(&htim6);
         Current_ClearWindowFlag();
 
+        /* 实际积分拍数 —— 结果行的 T= 就是它 * 160us。模式一恒为整窗 6250 拍
+         * (=1000ms), 但必须在这里显式赋值: 这个变量只在下面小电流分支里被写过,
+         * 模式一不赋值的话 T= 会报 0ms (实测踩过, 报告里 I=C*dV/T 的 T 就错了)。
+         * 转小电流模式时会被下面的 SmallI_GetActualTicks() 覆写。 */
+        measurement_ticks = Current_GetSampleCount();
+
         /* 判据取绝对值: 模式二上积相只覆盖一个电流方向 (current.c 的 HARD_UP),
          * 单边判据会把大负电流也误送进去, 白花 10s */
         if (fabsf(current) < DIRECT_MEASURE_THRESHOLD)
