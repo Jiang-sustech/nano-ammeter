@@ -25,7 +25,11 @@
 #define CAL_MODE  CAL_NONE
 
 /* CAL_ZERO 单轮采样时长 (秒) */
+/* 单轮时长 (秒)。**不要设得太长**: 摆幅 8.6V / C=100pF -> 可积 860pC,
+ * 按 5pA 算 172 秒就撞轨, 单轮超过它后段全平躺、漂移恒为 0。
+ * 1000 秒的系统表征靠**多轮重复**得到 (标准差要的是轮间离散度)。 */
 #define CAL_ZERO_SECONDS 10U
+#define CAL_ZERO_ROUNDS  100U   /* 100 轮 x 10 秒 = 1000 秒 */
 
 /* 标定主流程 (CAL_MODE != CAL_NONE 时由 main.c 调用) */
 void CalMode_Start(void);        /* 配置 ADG/TIM6, 启动标定采样 */

@@ -64,6 +64,7 @@ float Current_GetSwingVoltage(void);   /* 1s 窗口内积分器电压峰峰值 (
 /* ---- 小电流模式: 纯积分 + 斜率 (1 pA ~ 1 nA) ----
  * 模式二的双斜率在 1 pA 下需要 200 秒才积得起 2V, 覆盖不到 pA 量程;
  * 小电流直接积分、测首尾两点即可 (1pA 积 3s 才 30mV, 离轨很远)。 */
+void Current_PullToZero(void);      /* 阻塞把积分器拉到零位 (必须在 TIM6 未跑时调用) */
 void SmallI_Start(void);            /* 阻塞复位 + 稳定 + 取起点, 然后开积分 */
 uint8_t SmallI_IsFinished(void);
 uint8_t SmallI_IsShort(void);       /* 撞轨提前收尾 (结果有效, 但积分时间短了) */

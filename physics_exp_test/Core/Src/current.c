@@ -553,17 +553,19 @@ static void SmallI_Tick(uint16_t raw, uint16_t raw_ext)
     }
 }
 
-void SmallI_Start(void)
+/* 把积分器拉到零位 (阻塞)。必须在 TIM6 未跑时调用 ——
+ * Adc_ReadRaw 不可重入, 不能与 ISR 里的转换并发。
+ *
+ * 为什么每个长积分测量都得先复位: 空闲态 ADG 断开, 积分器被输入电流一直
+ * 推着走。不复位就开始积分, 起点可能在轨上 —— 那样积分出来的 dV 是假的。
+ * 按 5pA 算 1000 秒要漂 50V, 而摆幅只有 ±4.3V, 必然撞轨。 */
+void Current_PullToZero(void)
 {
-    uint16_t raw = 0U, ext = 0U;
-    uint32_t i, guard;
-    float sum_i = 0.0f, sum_e = 0.0f;
+    uint16_t raw = Adc_ReadRaw();
+    uint32_t guard;
 
     ThresholdCodes_Init();
 
-    /* ---- 复位相 (阻塞): 拉到零位, 让两个方向的电流都有满摆幅可用 ----
-     * 与模式二同样的思路; 此刻 TIM6 未跑, 可以安全阻塞轮询 */
-    raw = Adc_ReadRaw();
     if (raw > code_zero)
     {
         guard = HARD_RESET_GUARD;
@@ -579,6 +581,16 @@ void SmallI_Start(void)
         while ((raw < code_zero) && (guard != 0U)) { raw = Adc_ReadRaw(); guard--; }
     }
     ADG_Disable();                          /* 断开参考: 只让被测电流积分 */
+}
+
+void SmallI_Start(void)
+{
+    uint16_t raw = 0U, ext = 0U;
+    uint32_t i;
+    float sum_i = 0.0f, sum_e = 0.0f;
+
+    /* ---- 复位相 (阻塞): 拉到零位, 让两个方向的电流都有满摆幅可用 ---- */
+    Current_PullToZero();
 
     /* ---- 稳定等待 + 起点 (阻塞) ----
      * 断开瞬间有电荷注入台阶, 必须先等它过去再取起点; 否则那一步会被

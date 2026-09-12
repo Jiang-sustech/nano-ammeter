@@ -12,46 +12,99 @@
 
 #if CAL_MODE == CAL_ZERO
 
-/* ---- CAL_ZERO: 在线最小二乘拟合量 (无缓冲, 中断内累加) ---- */
-static volatile uint64_t sum_t, sum_v, sum_tt, sum_tv, sum_vv;
+/* ---- CAL_ZERO: 每轮复位 + 积分 10 秒, 重复 CAL_ZERO_ROUNDS 轮 ----
+ *
+ * **为什么是短轮次而不是一次长积分**: 摆幅 8.6V / C=100pF -> 可积 860pC,
+ * 按 5pA 算 172 秒就撞轨。单轮 1000 秒的话后段全平躺在轨上, 漂移恒为 0。
+ * 而本底噪声要的是**轮间离散度**, 本来就得靠多轮重复 (报告 4.3.1 的方法:
+ * 零输入 -> 连续采样 -> 平均值 = 零点偏差 -> 标准差 = 本底噪声)。
+ *
+ * 累积量用 double, t 以秒为单位 —— 最小二乘的两项在拍单位下都接近 1e19,
+ * 贴着 uint64 上限且相减精度不可接受。
+ */
+static volatile double   sum_t, sum_v, sum_tt, sum_tv, sum_vv;
 static volatile uint32_t tick_count;
-static volatile uint8_t cal_done;
+static volatile uint8_t  cal_done;
+static volatile uint16_t zmin_code, zmax_code;   /* 压轨检测: 撞轨时斜率恒为 0 */
+
 static double mean_code, std_code, slope_code_per_s;
+
+/* 轮间统计 (跨轮累加, 不清零) */
+static uint32_t round_count;
+static double   sum_means, sumsq_means;
+static double   cum_zero_code, cum_noise_code;
+
+#define CAL_ZERO_TICKS   (CAL_ZERO_SECONDS * 6250U)
 
 static void CalZero_Compute(void)
 {
     double n = (double)tick_count;
-    double s_t = (double)sum_t, s_v = (double)sum_v;
-    double s_tt = (double)sum_tt, s_tv = (double)sum_tv, s_vv = (double)sum_vv;
-    double var, denom;
+    double denom;
 
-    mean_code = s_v / n;
-    var = s_vv / n - mean_code * mean_code;
-    std_code = (var > 0.0) ? sqrt(var) : 0.0;
-    denom = n * s_tt - s_t * s_t;
-    /* 每 tick 斜率 × 6250 tick/s = 码/s */
-    slope_code_per_s = (denom > 1e-9)
-                       ? (n * s_tv - s_t * s_v) / denom * 6250.0 : 0.0;
+    mean_code = sum_v / n;
+    std_code = sum_vv / n - mean_code * mean_code;
+    std_code = (std_code > 0.0) ? sqrt(std_code) : 0.0;
+
+    denom = n * sum_tt - sum_t * sum_t;
+    /* t 已经是秒, 斜率直接就是 码/s */
+    slope_code_per_s = (denom > 1e-9) ? (n * sum_tv - sum_t * sum_v) / denom : 0.0;
 }
 
-static void CalZero_Report(void)
+/* 一轮结束时把该轮均值并进轮间统计, 算出零点偏差与本底噪声 */
+static void CalZero_Cumulative(void)
 {
-    char buf[128];
-    char v_adc[16], drift_uv[16], ib_fa[16];
+    double n, var;
+
+    round_count++;
+    sum_means   += mean_code;
+    sumsq_means += mean_code * mean_code;
+
+    n = (double)round_count;
+    cum_zero_code = sum_means / n;
+    var = sumsq_means / n - cum_zero_code * cum_zero_code;
+    cum_noise_code = (var > 0.0) ? sqrt(var) : 0.0;
+}
+
+/* 单轮码 -> fA: 1 码 = 152.6uV(积分器域) -> 10 秒积分折合 1.526 fA */
+#define CAL_ZERO_FA_PER_CODE   1.526
+
+static void CalZero_Report(uint8_t brief)
+{
+    char buf[176];
+    char v_adc[16], drift_uv[16], ib_fa[16], zero_fa[16], noise_fa[16];
     double v_adc_mean = mean_code * (3.3 / 65536.0);
-    /* 码/s -> V_raw 域 V/s (反相映射): dV_raw/dt = -(dV_adc/dt)/GAIN */
     double dv_raw_dt = -slope_code_per_s * (3.3 / 65536.0) / (double)LEVELSHIFT_GAIN;
-    double ibias = (double)C_INT * dv_raw_dt;   /* A */
+    double ibias = (double)C_INT * dv_raw_dt;
+    uint8_t railed = (zmax_code >= 0xFF00U || zmin_code <= 0x00FFU) ? 1U : 0U;
 
     UART_FormatScaled((int64_t)(v_adc_mean * 1e4), 4, v_adc);
-    UART_FormatScaled((int64_t)(dv_raw_dt * 1e6), 2, drift_uv);  /* µV/s */
-    UART_FormatScaled((int64_t)(ibias * 1e15), 1, ib_fa);        /* fA */
+    UART_FormatScaled((int64_t)(dv_raw_dt * 1e6), 2, drift_uv);
+    UART_FormatScaled((int64_t)(ibias * 1e15), 1, ib_fa);
 
-    sprintf(buf, "CAL ZERO: N=%lu MEAN=%lu Vadc=%sV STD=%lu DRIFT=%suV/s IB=%sfA\r\n",
-            (unsigned long)tick_count, (unsigned long)(mean_code + 0.5), v_adc,
-            (unsigned long)(std_code + 0.5), drift_uv, ib_fa);
+    if (brief)
+    {
+        sprintf(buf, "CAL ZERO R=%lu/%u: MEAN=%lu Vadc=%sV STD=%lu DRIFT=%suV/s IB=%sfA CODE=%u..%u%s\r\n",
+                (unsigned long)round_count, (unsigned)CAL_ZERO_ROUNDS,
+                (unsigned long)(mean_code + 0.5), v_adc,
+                (unsigned long)(std_code + 0.5), drift_uv, ib_fa,
+                (unsigned)zmin_code, (unsigned)zmax_code,
+                railed ? " RAILED(本轮不可信)" : "");
+        UART_SendString(buf);
+        return;
+    }
+
+    /* 轮间汇总: 零点偏差 = 各轮均值的平均; 本底噪声 = 各轮均值的标准差 */
+    UART_FormatScaled((int64_t)(cum_zero_code * (3.3 / 65536.0) * 1e4), 4, v_adc);
+    UART_FormatScaled((int64_t)(cum_zero_code * CAL_ZERO_FA_PER_CODE), 2, zero_fa);
+    UART_FormatScaled((int64_t)(cum_noise_code * CAL_ZERO_FA_PER_CODE), 2, noise_fa);
+    sprintf(buf, "CAL ZERO SUM n=%lu T=%lus: ZERO=%lu (%sV, %sfA) NOISE=%lu (%sfA RMS)\r\n",
+            (unsigned long)round_count,
+            (unsigned long)(round_count * CAL_ZERO_SECONDS),
+            (unsigned long)(cum_zero_code + 0.5), v_adc, zero_fa,
+            (unsigned long)(cum_noise_code + 0.5), noise_fa);
     UART_SendString(buf);
 }
+
 
 #endif /* CAL_ZERO */
 
@@ -78,10 +131,22 @@ static void CalBang_Report(void)
 void CalMode_Start(void)
 {
 #if CAL_MODE == CAL_ZERO
-    sum_t = sum_v = sum_tt = sum_tv = sum_vv = 0U;
+    sum_t = sum_v = sum_tt = sum_tv = sum_vv = 0.0;
     tick_count = 0U;
     cal_done = 0U;
-    ADG_Disable();                  /* 全断: 零位检查 */
+    zmin_code = 0xFFFFU;
+    zmax_code = 0U;
+
+    if (round_count == 0U)          /* 只在本轮序列的最开头清零一次 */
+    {
+        sum_means = sumsq_means = 0.0;
+        cum_zero_code = cum_noise_code = 0.0;
+    }
+
+    /* 必须先复位: 空闲态 ADG 断开, 积分器被输入电流一直推着走。不复位就
+     * 开始积分, 起点可能在轨上 (码饱和 -> 码到电压的映射失效), 算出来的
+     * dV 是假的。必须在 TIM6 未跑时做 (阻塞)。 */
+    Current_PullToZero();
     HAL_TIM_Base_Start_IT(&htim6);
 #elif CAL_MODE == CAL_BANG
     Current_Start();                /* 模式一连续窗口 (不经单次状态机) */
@@ -94,16 +159,18 @@ void CalMode_Tick(void)
 {
 #if CAL_MODE == CAL_ZERO
     uint16_t raw = Adc_ReadRaw();       /* 控制通路; 零位检查不加观测扰动 */
-    uint64_t t = tick_count;
+    double t = (double)tick_count / 6250.0;      /* 秒 */
 
     sum_t  += t;
-    sum_v  += raw;
+    sum_v  += (double)raw;
     sum_tt += t * t;
-    sum_tv += t * (uint64_t)raw;
-    sum_vv += (uint64_t)raw * raw;
+    sum_tv += t * (double)raw;
+    sum_vv += (double)raw * (double)raw;
+    if (raw < zmin_code) { zmin_code = raw; }
+    if (raw > zmax_code) { zmax_code = raw; }
     tick_count++;
 
-    if (tick_count >= (uint32_t)CAL_ZERO_SECONDS * 6250U)
+    if (tick_count >= CAL_ZERO_TICKS)
     {
         HAL_TIM_Base_Stop_IT(&htim6);
         ADG_Disable();
@@ -120,8 +187,21 @@ void CalMode_Task(void)
 #if CAL_MODE == CAL_ZERO
     if (cal_done)
     {
-        CalZero_Report();
-        CalMode_Start();
+        CalZero_Cumulative();   /* 把本轮均值并进轮间统计 */
+        /* 每轮都报; 每 10 轮附一次轮间汇总 (否则要等到跑完才看得到趋势) */
+        CalZero_Report(1U);
+        if ((round_count % 10U) == 0U) { CalZero_Report(0U); }
+
+        if (round_count >= CAL_ZERO_ROUNDS)
+        {
+            CalZero_Report(0U);     /* 最终汇总 */
+            UART_SendString("CAL ZERO DONE\r\n");
+            /* 停在这里, 不重开一轮 */
+        }
+        else
+        {
+            CalMode_Start();
+        }
     }
 #elif CAL_MODE == CAL_BANG
     if (Current_WindowFinished())

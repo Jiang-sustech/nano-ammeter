@@ -35,6 +35,12 @@
  * 控制一律走串口/HTML 控制台; PB4 修好后删掉此宏即可恢复 */
 #define BUTTON_DISABLED
 static uint8_t has_result = 0;
+/* 1 = HSE 8MHz 晶振; 0 = MSI 内部 RC (实测 HSE 起振正常, 见 docs) */
+#ifndef CLOCK_USE_HSE
+#define CLOCK_USE_HSE 0
+#endif
+
+const char *clock_source_name = "?";   /* 实际用上的时钟源, READY 行报出来 */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -248,8 +254,12 @@ int main(void)
     CalMode_Task();
   }
 #else
+  {
+    char buf[80];
+    sprintf(buf, "NANO-AMMETER READY (%s)\r\n", clock_source_name);
+    UART_SendString(buf);
+  }
   OLED_DrawScreen("+0.000", "nA", "MODE:IDLE");
-  UART_SendString("NANO-AMMETER READY\r\n");
 #endif
   /* USER CODE END 2 */
 
@@ -344,12 +354,62 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
+  /** 时钟源: HSE 8MHz 晶振 -> PLL -> SYSCLK 80MHz
+  * 2026-09-12 实测本板 HSE 起振正常 (RCC_CR.HSERDY 置位), 比 MSI 准得多。
+  *   8MHz / M(1) = 8MHz 输入;  x N(20) = 160MHz VCO;  / R(2) = 80MHz
+  *
+  * HSE 起不来就退回 MSI (48/6 x20 /2 = 80MHz), **不要直接 Error_Handler** ——
+  * 那样整机卡死, 连串口都没了没法诊断。用哪个源会在 READY 行报出来。
   */
+#if CLOCK_USE_HSE == 2
+  /* 诊断模式: SYSCLK 直接取 HSE, **不过 PLL**。
+   * 好处: flash 等待周期只需 0~1 个, 无论晶振多少 MHz 都不会因超频而崩,
+   *       也就不会掩盖问题。
+   * 串口波特率随之变成 115200 x F / 80 (F 单位 MHz) —— 扫波特率即可
+   * 反推晶振实际频率。
+   */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    clock_source_name = "HSE 直连失败";
+    Error_Handler();
+  }
+  clock_source_name = "HSE direct (DIAG)";
+#elif CLOCK_USE_HSE
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 1;
+  RCC_OscInitStruct.PLL.PLLN = 20;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV7;
+  RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
+  RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
+
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
+    RCC_OscInitStruct.MSIState = RCC_MSI_ON;
+    RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_11;   /* 48 MHz */
+    RCC_OscInitStruct.MSICalibrationValue = RCC_MSICALIBRATION_DEFAULT;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_MSI;
+    RCC_OscInitStruct.PLL.PLLM = 6;
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+    {
+      Error_Handler();              /* 连 MSI 都不行: 真没救了 */
+    }
+    clock_source_name = "MSI 48MHz (HSE 起振失败, 已退回)";
+  }
+  else
+  {
+    clock_source_name = "HSE 8MHz";
+  }
+#else
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
   RCC_OscInitStruct.MSIState = RCC_MSI_ON;
-  RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_11;   /* 48 MHz */
+  RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_11;
   RCC_OscInitStruct.MSICalibrationValue = RCC_MSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_MSI;
@@ -362,17 +422,29 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+  clock_source_name = "MSI 48MHz";
+#endif
 
   /** Initializes the CPU, AHB and APB buses clocks
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+#if CLOCK_USE_HSE == 2
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSE;
+#else
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+#endif
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
+#if CLOCK_USE_HSE == 2
+  /* HSE 直连: F<=16MHz 0 WS, <=32MHz 1 WS —— 取 1 稳妥 */
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+#else
+  /* PLL 到 80MHz (VOS1) 需 4 WS */
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
+#endif
   {
     Error_Handler();
   }
