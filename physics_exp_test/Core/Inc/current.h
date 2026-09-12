@@ -64,8 +64,11 @@ void Current_Start(void);
 extern volatile uint32_t precond_timeout;
 void Current_Stop(void);               /* 停止: 停 TIM6 + 关 ADG (空闲不注入参考) */
 void Current_Process(void);            /* TIM6 中断每 160us 调用一次 */
-float Calculate_Current(void);         /* 式(6), 用内置 ADC 缓冲 (控制路径) */
-float Calculate_Current_From(const uint16_t *buf);  /* 同式(6), 指定用哪一路缓冲 */
+/* 式(6), 指定用哪一路缓冲。v_first = 该路的窗口起点码 (拉回相最后一拍),
+ * 由 Current_GetFirstCode() / Current_GetFirstCodeExt() 给 */
+float Calculate_Current_From(const uint16_t *buf, uint16_t v_first);
+uint16_t Current_GetFirstCode(void);     /* 窗口起点 V_01 (内置路) */
+uint16_t Current_GetFirstCodeExt(void);  /* 窗口起点 V_01 (外部路) */
 float Current_GetWindowResultExt(void); /* 同一窗口由 ADS8866 算出的结果 */
 uint8_t Current_WindowFinished(void);  /* 窗口完成脉冲 (每秒一次, 消费式) */
 void Current_ClearWindowFlag(void);

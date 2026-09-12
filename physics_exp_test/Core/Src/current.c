@@ -154,24 +154,99 @@ static void ThresholdCodes_Init(void)
 /* ============================================================
  * 模式一: 滞回电荷平衡 (1 秒窗口)
  * ============================================================ */
-/* 拉回相守卫: 每次 Adc_ReadRaw() 约 8us (ADC 时钟 80MHz, 采样 640.5 周期),
- * 50000 次约 400ms。
+/* ============================================================
+ * 拉回相 (现在在 ISR 里做)
  *
- * 量级参考 (C=100pF, |I_ref|=50nA, 拉回速率 = 净电流/C):
- *   最坏行程 5.3V (电平移位饱和轨 -> 0V), 输入 0     -> 500V/s  -> 约 11ms
- *   输入 45nA 与参考相抵                            ->  50V/s  -> 约 106ms
- * 即 400ms 对最坏情况有约 4 倍余量。
- * 再往外就只是防挂死保险丝, 不是量程判据 (超量程由用户保证不会发生) */
-#define PRECOND_GUARD  50000U
+ * ---- 为什么搬进 ISR ----
+ * 拉到零的"最后一拍"要直接当窗口的起点 V_01 用。只有在 ISR 里采, 它才和
+ * 后面的采样点落在**同一套节拍网格**上。
+ *
+ * 若在主循环里拉 (旧做法), V_01 到采样点 0 的间隔是
+ *       160µs + (读一次 ADC 的耗时) + (启动 TIM6 的代码延时)
+ * 比整一拍多出后面两项 —— 那一截是实打实的参考注入, 而它不属于任何一拍,
+ * 折算约 0.5~1 pA 的恒定误差 (还依赖编译结果, 说不清来源)。
+ *
+ * ---- 搬进来之后节拍是这样对齐的 ----
+ *       节拍 0..p        拉回相 (不计数、不进缓冲)
+ *       节拍 p           V_01 -> v01_int / v01_ext
+ *       节拍 p+1..p+N    窗口 -> voltage_buf[0..N-1], 每拍计一次数
+ *
+ * 窗口两端 (V_01 与最后一个窗口采样) 都是 ISR 采样, 偏移完全相同;
+ * 而计数覆盖的正好是它们之间的 N 个间隔。于是:
+ *
+ *       n_total = m_count + n_count = N        <- 不用减一
+ *       窗口时长 = N × 160µs = 1.000 s 整       <- 不用再凑
+ *
+ * 论文的 (m+n) 形式因此**精确成立**, 那个"多一拍"的纠缠彻底消失。
+ * (旧设计窗口是 N-1 个间隔 = 0.99984 s, 论文形式差 0.99984 与 8.04 pA)
+ * ============================================================ */
+
+/* 拉回相守卫 (拍数): 一拍 160µs, 2500 拍 = 400ms。
+ * 最坏行程 5.3V (电平移位饱和轨 -> 0V): 净 50nA -> 500V/s -> 10.6ms;
+ * 输入 45nA 与参考相抵时净 5nA -> 50V/s -> 106ms。400ms 有 3.8 倍余量。
+ * 这是防挂死保险丝, 不是量程判据 —— 超时也照常开窗 */
+#define PRECOND_TICKS  2500U
+
+static volatile uint8_t  precond_active;    /* 1 = ISR 正在拉回, 尚未开窗 */
+static uint8_t           precond_ready;     /* 0 = 还没记下初始符号 */
+static uint8_t           precond_pos;       /* 1 = 上一拍 raw > code_zero */
+static uint32_t          precond_ticks;
+
+static uint16_t          v01_int, v01_ext;  /* 拉回最后一次采样 = 窗口起点 */
 
 /* 拉回相未能在守卫内到位次数 (SWD 按符号读, 正常恒为 0) */
 volatile uint32_t precond_timeout;
 
+/* 收官: 本拍采样作为 V_01, 从下一拍起开窗 */
+static void Precond_Finish(uint16_t raw, uint16_t raw_ext)
+{
+    v01_int = raw;
+    v01_ext = raw_ext;
+    precond_active = 0U;
+    sample_index = 0U;                      /* 窗口从 voltage_buf[0] 开始 */
+}
+
+/* 拉回相每拍 (由 Current_Process 转发, 已带两路采样) */
+static void Precond_Tick(uint16_t raw, uint16_t raw_ext)
+{
+    uint8_t pos = (uint8_t)((int32_t)raw > (int32_t)code_zero);
+
+    precond_ticks++;
+
+    /* 极性的设置与"是否收官"无关: 它决定的是**下一段** [tick_k, tick_k+1]
+     * 用哪个参考, 也就是下一拍 ISR 要记的那一拍。收官那一拍也必须设 ——
+     * 否则开窗第一段的极性会停在上上拍, 记错。 */
+    if (pos)
+    {
+        sel_state = SEL_NEG;                /* raw 偏高 -> V_o 上抬 -> raw 下降 */
+        ADG_Select_Negative();
+    }
+    else
+    {
+        sel_state = SEL_POS;                /* raw 偏低 -> V_o 下压 -> raw 上升 */
+        ADG_Select_Positive();
+    }
+
+    if ((precond_ready != 0U) && (pos != precond_pos))
+    {
+        Precond_Finish(raw, raw_ext);       /* 与上一拍异号: 已越过零点 */
+        return;
+    }
+
+    if (precond_ticks >= PRECOND_TICKS)
+    {
+        precond_timeout++;                  /* 防挂死保险丝: 超时也照常开窗 */
+        Precond_Finish(raw, raw_ext);
+        return;
+    }
+
+    /* 首拍没有"上一拍"可比, 只记符号 —— 否则会把起始点自己判成"已越过" */
+    precond_ready = 1U;
+    precond_pos   = pos;
+}
+
 void Current_Start(void)
 {
-    uint16_t raw;
-    uint32_t guard;
-
     m_count = 0;
     n_count = 0;
     sample_index = 0;
@@ -179,75 +254,21 @@ void Current_Start(void)
     last_m = 0U;
     last_n = 0U;
     finish_flag = 0;
-    sel_state = SEL_POS;        /* 默认输入正向标准电流 */
     si_active = 0U;
     si_done = 0U;
 
     ThresholdCodes_Init();
 
+    /* 拉回相交给 ISR 做 (理由见上面的长注释)。这里只摆状态 —— 不阻塞,
+     * 主循环立刻返回, 调用方接着 HAL_TIM_Base_Start_IT */
+    precond_active = 1U;
+    precond_ready  = 0U;
+    precond_pos    = 0U;
+    precond_ticks  = 0U;
+
     ADG_Enable();
-
-    /* ---- 拉回相 (阻塞): 把积分器拉到接近 0V ----
-     * 必须在调用方 HAL_TIM_Base_Start_IT 之前完成 —— 此刻 TIM6 未跑,
-     * ISR 不参与, 所以这里可以安全地阻塞轮询 Adc_ReadRaw()
-     * (Adc_ReadRaw 不可重入, 不能与 ISR 里的转换并发)。
-     *
-     * 为什么需要: 空闲态 ADG 断开 (Current_Stop 关断参考), 积分器被被测
-     * 电流推到压轨。直接开窗的话窗口开头约 6ms (38 tick) 落在电平移位器
-     * 饱和区, voltage_buf[0] 变成一个推不出真实电压的轨值, 式(6) 的
-     * C*(Vo1-Vo2)/(N*T) 项随之失效 -> 结果带固定偏置
-     * (实测两次逐位相同的 25.274nA, 说明它是偏置而不是噪声)。
-     *
-     * ---- 为什么目标是 0V 而不是某个阈值 ----
-     * 1) 拉到边界是**赌符号**: 拉到 -4.3V 后若被测电流把它往更负推, 余量
-     *    就是 0, 第一拍立刻撞轨 (底噪那一轮 100% 满量程就是这么来的)。
-     *    拉到 0V 则两个方向各留 4.3V, 不需要预知电流符号。
-     * 2) 恰好停在阈值上开窗, 第一拍立即触发切换, 那个相位退化成 1 拍
-     *    (旧记录里见过"第一个 NEG 相 285 拍 / 稳态 36.5 拍"这种畸变)。
-     *    停在 0V 则第一个相位是正常长度。
-     * 3) 0V 是电平移位器最线性的点。
-     * 代价: 两次测量的 6250 点不再逐点相位对齐。那只影响波形叠图比对,
-     * 不影响电流值 —— 式(6) 用的是实测的 Vo1/Vo2。 */
-    raw = Adc_ReadRaw();
-    guard = PRECOND_GUARD;
-
-    if (raw > code_zero)                    /* 典型: 压在下轨 (raw 满量程) */
-    {
-        ADG_Select_Negative();              /* V_o 上抬 -> raw 下降 */
-        while ((raw > code_zero) && (guard != 0U))
-        {
-            raw = Adc_ReadRaw();
-            guard--;
-        }
-    }
-    else
-    {
-        ADG_Select_Positive();              /* V_o 下压 -> raw 上升 */
-        while ((raw < code_zero) && (guard != 0U))
-        {
-            raw = Adc_ReadRaw();
-            guard--;
-        }
-    }
-
-    /* 守卫超时也照常开窗 —— 不新增超量程上报路径 (输入可控), 这里只作
-     * 防挂死保险丝。最坏行程 5.3V: 45nA 输入与参考相抵时净 5nA -> 50V/s
-     * -> 106ms, 而 PRECOND_GUARD 约 400ms, 4 倍余量 */
-    if (guard == 0U)
-    {
-        precond_timeout++;
-    }
-
-    /* ---- 开窗恒用 NEG, 与拉回方向无关 ----
-     * 式(6) 的计数修正是 `n_span = n_count - 1` —— 第 0 拍的计数对应窗口外
-     * 的 [-1, 0] 段, 所以多出来的那一拍必定是 NEG。**这条依赖"窗口恒以 NEG 开"
-     * 这个不变量**; 若让开窗极性跟着拉回方向走, 从下往上拉时多出来的就是 POS,
-     * 修正就该减 m_count —— 静默算错。
-     * 起点在 0V, 所以 NEG 这个首相位是正常长度 (到 code_lower 约 109 拍),
-     * 不会像停在阈值上那样退化成 1 拍。
-     * 切换瞬间的电荷注入被 100MΩ 隔离在积分节点之外 (开关在电阻之前), 无害。 */
-    sel_state = SEL_NEG;
-    ADG_Select_Negative();
+    sel_state = SEL_POS;        /* 先给个确定极性; ISR 第一拍就按实际偏差改 */
+    ADG_Select_Positive();
 }
 
 /* 停止测量: 停 TIM6 + 关断 ADG (空闲状态不注入参考电流) */
@@ -268,6 +289,14 @@ void Current_Process(void)
     if (si_active)
     {
         SmallI_Tick(raw, raw_ext);
+        return;
+    }
+
+    /* ---- 拉回相 (把积分器拉到接近 0V, 见 Precond_Tick 的注释) ----
+     * 这一相不计数、不进缓冲; 它的最后一拍就是窗口起点 V_01 */
+    if (precond_active)
+    {
+        Precond_Tick(raw, raw_ext);
         return;
     }
 
@@ -309,8 +338,8 @@ void Current_Process(void)
     {
         /* 窗口完成: 中断内先算结果; 单次测量下主循环随后会停 TIM6,
          * 完整窗口数据保留在电压缓冲里供 B 指令回传 */
-        window_current = Calculate_Current();
-        window_current_ext = Calculate_Current_From(voltage_buf_ext);
+        window_current     = Calculate_Current_From(voltage_buf, v01_int);
+        window_current_ext = Calculate_Current_From(voltage_buf_ext, v01_ext);
         finish_flag = 1;            /* 同时封存窗口, 直到消费方取走结果 */
         last_window_count = TOTAL_CYCLE;
         last_m = m_count;
@@ -331,22 +360,22 @@ void Current_Process(void)
  * (ADS8866) 同 tick 同索引存储, 因此可以逐点互换。
  * 物理实验表征固件里最终结果以 ADS8866 为准 (16 位分辨率, 内置只有 12 位
  * 左移 4 位、等效 16 码), 内置那路作为对照。 */
-float Calculate_Current_From(const uint16_t *buf)
+float Calculate_Current_From(const uint16_t *buf, uint16_t v_first)
 {
     float n_total, dc;
-    uint32_t m_span, n_span;
 
     if (sample_index == 0U)
     {
         return 0.0f;
     }
 
-    /* 端点样本之间只有 N-1 个 160us 间隔: 计数按"每拍一次"累加, 而开关判决在
-     * 采样之后才生效, 第 j 拍的计数对应的是它之前那一段 [j-1, j] —— 第 0 拍
-     * 因此落在窗口外。Current_Start 保证以 SEL_NEG 开窗, 多出来的必定是 NEG。
-     * (旧写法按 N 和全部 N 拍算, 结果恒为 I*0.99984 + 8.0pA) */
-    m_span = m_count;
-    n_span = n_count - 1U;
+    /* ---- 为什么分母是 (m+n), 不用减一 ----
+     * 窗口两端都是 ISR 采样: v_first 是拉回相最后一拍, buf[sample_index-1] 是
+     * 最后一个窗口采样。而计数覆盖的正好是它们之间的那些间隔 —— ISR 的采样和
+     * 参考切换落在同一套节拍网格上, 一一对应, 没有"多出来的一拍"需要判断归属。
+     * (旧设计窗口两端是窗口内的采样点, 只有 N-1 个间隔而计数有 N 拍, 才要减一,
+     *  而且减在哪个计数器上还依赖开窗极性 —— 那个纠缠随这次重构一起消失了) */
+    dc = (float)buf[sample_index - 1U] - (float)v_first;
 
     /* 端点项直接在码域算。推导:
      *   Vo = (V_ADC_ZERO - c·VREF/65536)/GAIN
@@ -354,19 +383,16 @@ float Calculate_Current_From(const uint16_t *buf)
      *   C·(Vo1 - Vo2) = [C·VREF/(65536·GAIN)]·(c2 - c1) = q·(c2 - c1)
      * 于是省掉一次除法和 V_ADC_ZERO, 而且 q 是可标定量 (cal_coef), 不再依赖
      * C / VREF / GAIN 三个从没测过的标称值 */
-    dc = (float)buf[sample_index - 1U] - (float)buf[0];
-
-    n_total = (float)(m_span + n_span);
+    n_total = (float)(m_count + n_count);
     n_total = Cal_GetQ() * dc / (n_total * T_INT)
-              - ((float)m_span * Cal_GetIPos() + (float)n_span * Cal_GetINeg()) / n_total;
+              - ((float)m_count * Cal_GetIPos() + (float)n_count * Cal_GetINeg()) / n_total;
 
     return n_total;
 }
 
-float Calculate_Current(void)
-{
-    return Calculate_Current_From(voltage_buf);
-}
+/* 窗口起点 (拉回相最后一拍的采样码), 供结果行的 RAW 段上报 */
+uint16_t Current_GetFirstCode(void)    { return v01_int; }
+uint16_t Current_GetFirstCodeExt(void) { return v01_ext; }
 
 uint8_t Current_WindowFinished(void)
 {
@@ -606,6 +632,11 @@ static void SmallI_Tick(uint16_t raw, uint16_t raw_ext)
 
 /* 把积分器拉到零位 (阻塞)。必须在 TIM6 未跑时调用 ——
  * Adc_ReadRaw 不可重入, 不能与 ISR 里的转换并发。
+ *
+ * 注: 模式一不用这个 —— 它的拉回相在 ISR 里 (Precond_Tick), 因为要拿"拉回的
+ * 最后一拍"当窗口起点 V_01, 必须在同一套节拍网格上。这个阻塞版是给那些
+ * **不需要 V_01** 的场合用的: 小电流模式、CAL_ZERO、底噪 —— 它们都是"拉回后
+ * 断开参考做纯积分", 起点自己另测。
  *
  * 为什么每个长积分测量都得先复位: 空闲态 ADG 断开, 积分器被输入电流一直
  * 推着走。不复位就开始积分, 起点可能在轨上 —— 那样积分出来的 dV 是假的。

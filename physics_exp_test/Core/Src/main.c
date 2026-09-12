@@ -93,7 +93,8 @@ static void FormatCurrentNA(float current, char *buf)
  * 超时时数值无意义, 不出 CAL=。
  *
  * RAW 段是离线拟合要用的原始量: m/n = POS/NEG 周期数, INT1/INT2 与 EXT1/EXT2
- * = 窗口首尾两个采样点的原始码 (内置那路 / ADS8866 那路)。只报电流值的话这些量
+ * = 窗口首尾两个端点的原始码 (内置那路 / ADS8866 那路)。INT1/EXT1 是拉回相最后
+ * 一拍的采样 (V_01), 不是 voltage_buf[0] —— 式(6) 用的端点就是它。只报电流值的话这些量
  * 就丢了 —— 而 (m+n) 与 (m+n-1) 两种分母之争、以及分段系数 a/b 的拟合,
  * 都得从**同一次测量**的原始量出发, 不然只能靠反推。报告的表 4-9~4-14 也用得上。
  *
@@ -121,9 +122,9 @@ static void UART_SendResultLine(float cur_int, float cur_ext, uint8_t mode,
                      " RAW m=%lu n=%lu INT1=%u INT2=%u EXT1=%u EXT2=%u",
                      (unsigned long)Current_GetMCount(),
                      (unsigned long)Current_GetNCount(),
-                     (unsigned)Current_GetSample(0U),
+                     (unsigned)Current_GetFirstCode(),
                      (unsigned)Current_GetSample(npt - 1U),
-                     (unsigned)Current_GetExtSample(0U),
+                     (unsigned)Current_GetFirstCodeExt(),
                      (unsigned)Current_GetExtSample(npt - 1U));
         }
     }

@@ -256,7 +256,7 @@ def main():
         print("\n[raw] m=%s n=%s  INT %s->%s  EXT %s->%s"
               % (m.group("m"), m.group("n"), m.group("int1"), m.group("int2"),
                  m.group("ext1"), m.group("ext2")))
-        print("      (式(6) 用的分母是 m+n-1: 第 0 拍的计数对应窗口外的 [-1,0] 段)")
+        print("      (式(6) 的分母就是 m+n: 窗口两端都是 ISR 采样, 计数与间隔一一对应)")
     with open(path[:-4] + ".log", "w", encoding="utf-8") as f:   # 人读的纯文本副本
         f.write("# %s  port=%s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), PORT))
         f.write("\n".join(TRANSCRIPT) + "\n")
@@ -274,7 +274,7 @@ def plot_only(wi, we, ns, path="nanoammeter_data.npz"):
     lead = 0
     while lead < len(wi) and wi[lead] >= 65000:
         lead += 1
-    print("     >>> WAVE[0]=%d  (期望 ~58962 / 旧行为 65520)"
+    print("     >>> WAVE[0]=%d  (期望 ~30782 = code_zero; 旧行为 65520 压轨)"
           "  leading saturated prefix=%d (期望 0)" % (wi[0], lead))
     n = min(len(wi), len(we))
     a, e = wi[:n], we[:n]
