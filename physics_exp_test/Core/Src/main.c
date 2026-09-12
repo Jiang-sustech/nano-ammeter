@@ -34,7 +34,6 @@
 /* PB4 按键硬件故障 (恒读低), 全部按键功能关闭 (用户决定):
  * 控制一律走串口/HTML 控制台; PB4 修好后删掉此宏即可恢复 */
 #define BUTTON_DISABLED
-static uint8_t noise_mode_active = 0;
 static uint8_t has_result = 0;
 /* USER CODE END PV */
 
@@ -42,7 +41,6 @@ static uint8_t has_result = 0;
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 static void Measurement_Task(void);
-static void Noise_Task(void);
 static void OLED_DrawScreen(const char *value, const char *unit, const char *mode);
 static void FormatCurrentNA(float current, char *buf);
 static void UART_SendResultLine(float cur_int, float cur_ext, uint8_t mode,
@@ -51,7 +49,6 @@ static void UART_SendResultQuery(void);
 static void UART_DumpBuffer(const char *tag, uint16_t (*get)(uint32_t), uint32_t count);
 static void UART_DumpWaveform(void);
 static void UART_DumpExtWaveform(void);
-static void UART_DumpNoiseSeries(void);
 static void UART_SendExtDiag(void);
 /* USER CODE END PFP */
 
@@ -175,13 +172,6 @@ static void UART_DumpExtWaveform(void)
     UART_DumpBuffer("WAVEX", Current_GetExtSample, Current_GetSampleCount());
 }
 
-/* W 指令: 回传最近一次底噪测量的逐秒序列 (1 点/秒, 共 50 点)
- * 与 B/X 同格式, 头字 NOISE。压轨时这串点会是一条平直线, 图上直接可见 */
-static void UART_DumpNoiseSeries(void)
-{
-    UART_DumpBuffer("NOISE", Noise_GetSample, Noise_GetSampleCount());
-}
-
 /* E 指令: 观测通路健康度一行 (免去 12.5KB 回传就能判断好坏)
  * ERR = 坏读数 (0x0000 转换未完成 / 0xFFFF DOUT 常高);
  * TXE/RXNE/BSY = SPI 寄存器级守卫超时次数, 正常应恒为 0;
@@ -275,25 +265,13 @@ int main(void)
     Button_Task();
 #endif
 
-    /* 测量/底噪期间忽略一切指令 (单次语义: 测完自动回 IDLE 后才接受新指令) */
-    if (!noise_mode_active
-        && MeasurementState_GetState() == MEASUREMENT_STATE_IDLE)
+    /* 测量期间忽略一切指令 (单次语义: 测完自动回 IDLE 后才接受新指令) */
+    if (MeasurementState_GetState() == MEASUREMENT_STATE_IDLE)
     {
-      /* 长按(>3s): 底噪/偏置电流测量 (ADG 全断, 纯积分) */
-#ifndef BUTTON_DISABLED
-      if (Button_LongPressRequested())
-      {
-        Noise_Start();
-        noise_mode_active = 1;
-        OLED_DrawScreen("+0.000", "nA", "MODE:NOISE");
-        UART_SendString("NOISE START (50s)\r\n");
-        Button_MeasurementDone();
-      }
-#endif
-
-      /* 串口指令: S=单次测量 N=底噪 D=查询结果
-       *           B=回传内置 ADC 波形 X=回传 ADS8866 波形 E=观测诊断
-       *           W=回传底噪逐秒序列 */
+      /* 串口指令: S=单次测量   D=查询结果
+       *           B=内置 ADC 波形  X=ADS8866 波形  E=观测通路自检
+       * 参数化指令 (整行): C=查询校准系数  K<段>,<a_ppm>,<b_fA>=写入  Z=清除
+       *                   T<秒>=小电流模式积分时长 */
       /* 整行接收: 参数化指令 (K/C/Z) 需要整行; 单字符指令走同一个缓冲,
        * 长度 1 的行就是简单指令 */
       char line[UART_LINE_MAX];
@@ -313,12 +291,6 @@ int main(void)
         OLED_DrawScreen("+0.000", "nA", "MODE1 RUN");
         UART_SendString("START MODE1\r\n");
         break;
-      case 'N':
-        Noise_Start();
-        noise_mode_active = 1;
-        OLED_DrawScreen("+0.000", "nA", "MODE:NOISE");
-        UART_SendString("NOISE START (50s)\r\n");
-        break;
       case 'D':
         UART_SendResultQuery();
         break;
@@ -330,9 +302,6 @@ int main(void)
         break;
       case 'E':
         UART_SendExtDiag();
-        break;
-      case 'W':
-        UART_DumpNoiseSeries();
         break;
       default:
         break;
@@ -350,8 +319,6 @@ int main(void)
 #endif
     }
 
-    /* 底噪任务: 50s 积分结束后拟合斜率 -> I_bias */
-    Noise_Task();
 
     /* 测量任务: 非阻塞推进 (TIM6 中断采样, 主循环查状态) */
     Measurement_Task();
@@ -441,57 +408,6 @@ static void Measurement_Task(void)
 }
 
 /* 底噪测量任务: 50s 积分结束后输出拟合偏置电流 (fA 量级) */
-static void Noise_Task(void)
-{
-  float ibias;
-  static uint32_t last_reported_sec = 0;
-
-  if (!noise_mode_active)
-  {
-    last_reported_sec = 0;
-    return;
-  }
-
-  /* 每 10s 报一次进度, 演示时可见 */
-  uint32_t elapsed = Noise_GetElapsedSec();
-  if (elapsed != last_reported_sec && (elapsed % 10U) == 0U)
-  {
-    char line[32];
-    sprintf(line, "NOISE %lu/50s\r\n", (unsigned long)elapsed);
-    UART_SendString(line);
-    last_reported_sec = elapsed;
-  }
-
-  if (Noise_IsFinished())
-  {
-    char fb[24];
-    char line[96];
-
-    if (Noise_IsSaturated())
-    {
-      /* 积分器在 50s 内撞轨并平躺 -> 拟合斜率恒为 0。
-       * 这个 0 是"没采到数据", 不是"偏置为零", 必须说清楚,
-       * 否则一个 +0.0 fA 会被当成真实的极小偏置电流接受下来。 */
-      sprintf(line, "IBIAS=RAIL (saturated, code %u..%u; input too large)\r\n",
-              (unsigned)Noise_GetMinCode(), (unsigned)Noise_GetMaxCode());
-      UART_SendString(line);
-      OLED_DrawScreen("RAIL", "fA", "MODE:NOISE");
-    }
-    else
-    {
-      ibias = Noise_GetBiasCurrent();
-      UART_FormatScaled((int64_t)((double)ibias * 1e15), 1, fb);   /* fA 1 位小数 */
-      sprintf(line, "IBIAS=%s fA\r\n", fb);
-      UART_SendString(line);
-      OLED_DrawScreen(fb, "fA", "MODE:NOISE");
-    }
-
-    /* 注意: 这里不能置 has_result —— D 指令查的是 MeasurementState 的
-     * 测量结果, 与底噪无关。置了会让 D 报出一个从没测过的测量值 */
-    noise_mode_active = 0;
-    Button_MeasurementDone();
-  }
-}
 /* USER CODE END 4 */
 
 /**

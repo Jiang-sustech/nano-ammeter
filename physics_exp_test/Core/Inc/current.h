@@ -63,7 +63,6 @@ uint32_t Current_GetNCount(void);           /* 最近完整窗口 NEG 周期数 
 uint16_t Current_GetMinCode(void);          /* 最近窗口最小码 = 下阈值切换点 (标定用) */
 uint16_t Current_GetMaxCode(void);          /* 最近窗口最大码 = 上阈值切换点 (标定用) */
 float Current_GetSwingVoltage(void);   /* 1s 窗口内积分器电压峰峰值 (V) */
-float Current_GetNoiseVoltage(void);   /* 去趋势后每采样噪声 RMS (V) */
 
 /* ---- 小电流模式: 纯积分 + 斜率 (1 pA ~ 1 nA) ----
  * 模式二的双斜率在 1 pA 下需要 200 秒才积得起 2V, 覆盖不到 pA 量程;
@@ -83,18 +82,5 @@ uint8_t HardIntegral_IsFinished(void);  /* 完成(预算用尽, 至少一个有�
 uint8_t HardIntegral_IsTimeout(void);   /* 超时 (一个有效循环都没有, 约 <6pA) */
 float HardIntegral_GetCurrent(void);    /* 多循环平均电流 (含电荷注入补偿) */
 
-/* ---- 底噪/偏置电流测量 (长按按键触发) ----
- * ADG 全断(无输入无参考), 纯积分 NOISE_MEASURE_SECONDS 秒,
- * 每秒存 1 点, 最小二乘拟合漂移斜率, I_bias = C * dV/dt */
-#define NOISE_MEASURE_SECONDS 50U       /* 积分时长 (秒), 临时底噪测试用 (正式标定 1000s) */
-void Noise_Start(void);
-uint8_t Noise_IsFinished(void);
-float Noise_GetBiasCurrent(void);       /* 拟合结果 (A) */
-uint8_t Noise_IsSaturated(void);        /* 1 = 采到的点压轨, 拟合值无意义 */
-uint16_t Noise_GetMinCode(void);        /* 50 点码值范围 (诊断) */
-uint16_t Noise_GetMaxCode(void);
-uint32_t Noise_GetElapsedSec(void);     /* 进度 (秒) */
-uint16_t Noise_GetSample(uint32_t index); /* 调试: 读取 1s 采样原始码 */
-uint32_t Noise_GetSampleCount(void);    /* 最近一次底噪序列已存点数 (W 指令回传用) */
 
 #endif

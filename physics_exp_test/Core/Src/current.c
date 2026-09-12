@@ -91,19 +91,6 @@ static float sum_current;                   /* 各循环电流累加 (求平均)
 static uint16_t prev_raw;
 static float t1_s, t2_s;
 
-/* ---- 底噪/偏置电流测量状态 ---- */
-#define TICKS_PER_SECOND 6250U       /* TIM6 160us -> 1s */
-static void Noise_Tick(void);
-static float HardIntegral_CycleCurrent(void);   /* 单循环双斜率结果 (前向声明) */
-static void SmallI_Tick(uint16_t raw, uint16_t raw_ext);
-static volatile uint8_t noise_active;
-static volatile uint8_t noise_done;
-static uint32_t noise_ticks;
-static uint32_t noise_samples;       /* 已存 1s 采样数 */
-static float noise_bias_current;
-static uint8_t noise_saturated;      /* 采到的点压轨 (结果不可信) */
-static uint16_t noise_min_code;      /* 50 个点的码值范围 (诊断用) */
-static uint16_t noise_max_code;
 
 /* ---- 小电流模式 (纯积分 + 斜率) 的参数与状态 ---- */
 #define SI_TICKS_PER_SEC   6250U        /* TIM6 160us -> 1s */
@@ -124,6 +111,10 @@ static float             si_cur_int,  si_cur_ext;       /* 结果 (A) */
 static uint16_t          si_ring_int[SI_AVG_TICKS];
 static uint16_t          si_ring_ext[SI_AVG_TICKS];
 static uint8_t           si_ring_n, si_ring_i;
+
+/* 前向声明 */
+static void SmallI_Tick(uint16_t raw, uint16_t raw_ext);
+static float HardIntegral_CycleCurrent(void);   /* 单循环双斜率结果 */
 
 /* ---- ADC 域阈值 (原始码) ---- */
 static uint16_t code_upper, code_lower, code_zero, code_target;
@@ -211,8 +202,6 @@ void Current_Start(void)
     finish_flag = 0;
     sel_state = SEL_POS;        /* 默认输入正向标准电流 */
     hard_phase = HARD_IDLE;
-    noise_active = 0U;
-    noise_done = 0U;
     si_active = 0U;
     si_done = 0U;
 
@@ -282,12 +271,6 @@ void Current_Process(void)
 {
     uint16_t raw;
     uint16_t raw_ext;
-
-    if (noise_active)
-    {
-        Noise_Tick();
-        return;
-    }
 
     raw = ReadBoth(&raw_ext);       /* 内置(控制) + 外部(观测) 同拍 */
 
@@ -628,46 +611,6 @@ float Current_GetSwingVoltage(void)
     return (float)dv;
 }
 
-/* 去趋势噪声: 用 ±5 点邻居线性插值抵消 bang-bang 斜坡,
- * 残差 RMS / sqrt(1.5) = 每采样白噪声 RMS (积分器域, V)
- * 说明: 直接算原始采样 std 会被锯齿波淹没, 必须先去趋势 */
-#define NOISE_DETREND_K 5U
-
-float Current_GetNoiseVoltage(void)
-{
-    double sum = 0.0, sumsq = 0.0, mean, var, resid_rms, sigma_code, sigma_v;
-    uint32_t n = 0U, i, total;
-
-    total = Current_GetSampleCount();   /* 同 GetSample: 不能用 sample_index */
-    for (i = NOISE_DETREND_K; i + NOISE_DETREND_K < total; i++)
-    {
-        double v_prev = (double)voltage_buf[i - NOISE_DETREND_K];
-        double v_next = (double)voltage_buf[i + NOISE_DETREND_K];
-        double resid = (double)voltage_buf[i] - (v_prev + v_next) / 2.0;
-        sum += resid;
-        sumsq += resid * resid;
-        n++;
-    }
-
-    if (n < 2U)
-    {
-        return 0.0f;
-    }
-
-    mean = sum / (double)n;
-    var = sumsq / (double)n - mean * mean;
-    if (var < 0.0)
-    {
-        var = 0.0;
-    }
-    resid_rms = sqrt(var);
-
-    /* var(残差) = sigma^2 * (1 + 1/2) = 1.5 sigma^2 (白噪声假设) */
-    sigma_code = resid_rms / 1.224744871;
-    sigma_v = sigma_code * ((double)ADS8866_VREF / 65536.0) / (double)LEVELSHIFT_GAIN;
-    return (float)sigma_v;
-}
-
 /* ============================================================
  * 小电流模式 (1 pA ~ 1 nA): 纯积分 + 斜率
  *
@@ -959,140 +902,17 @@ float HardIntegral_GetCurrent(void)
  * 底噪/偏置电流测量: ADG 全断 -> 纯积分 1000s,
  * 每秒 1 点存入 voltage_buf, 最小二乘拟合 dV/dt -> I_bias = C*dV/dt
  * ============================================================ */
-static void Noise_Fit(void)
-{
-    double sum_t = 0.0, sum_v = 0.0, sum_tt = 0.0, sum_tv = 0.0;
-    double n, denom, slope_code_per_s, dv_dt;
-    uint32_t i;
-    uint16_t vmin = 0xFFFFU, vmax = 0U;
 
-    for (i = 0U; i < noise_samples; i++)
-    {
-        double t = (double)i;               /* 采样序号 = 秒 */
-        double v = (double)voltage_buf[i];  /* 原始码 */
-        sum_t += t;
-        sum_v += v;
-        sum_tt += t * t;
-        sum_tv += t * v;
-        if (voltage_buf[i] < vmin) { vmin = voltage_buf[i]; }
-        if (voltage_buf[i] > vmax) { vmax = voltage_buf[i]; }
-    }
-
-    /* 压轨判定: 必须是"任一点在轨"。中途才撞轨时 vmin/vmax 还留在量程中段,
-     * 要求"全部点在轨"就会漏判, 于是半截平躺的序列被当成有效数据拟合出去,
-     * 上报一个偏小的、看起来很正常的 fA 值 —— 那 0 是"没数据"不是"没偏置"。
-     * (满轨实测 0xFFF0, 故用 0xFF00 判; 正常摆幅上界约 60k, 离它很远) */
-    noise_saturated = ((vmax >= 0xFF00U) || (vmin <= 0x00FFU)) ? 1U : 0U;
-    noise_min_code = vmin;
-    noise_max_code = vmax;
-
-    n = (double)noise_samples;
-    denom = n * sum_tt - sum_t * sum_t;
-    slope_code_per_s = (denom > 1e-9) ? (n * sum_tv - sum_t * sum_v) / denom : 0.0;
-
-    /* 码/s -> 积分器电压 V/s: V_o = (1.55 - V_ad)/0.33 (反相映射),
-     * 故 dV_o/dt = -(dV_ad/dt)/0.33 */
-    dv_dt = -slope_code_per_s * ((double)ADS8866_VREF / 65536.0)
-            / (double)LEVELSHIFT_GAIN;
-
-    /* I_bias = C * dV/dt */
-    noise_bias_current = (float)((double)C_INT * dv_dt);
-}
-
-void Noise_Start(void)
-{
-    ADG_Disable();              /* 所有输入关闭, 无参考注入 */
-
-    noise_active = 1U;
-    noise_done = 0U;
-    noise_ticks = 0U;
-    noise_samples = 0U;
-    noise_bias_current = 0.0f;
-    noise_saturated = 0U;
-    noise_min_code = 0U;
-    noise_max_code = 0U;
-
-    /* 底噪把 voltage_buf 复用成"每秒 1 点"的序列, 与模式一的波形缓冲
-     * 语义不同。清零计数可避免底噪跑完后 B/X 指令把这串慢采样当成
-     * 6250 点的波形回传出去 */
-    last_window_count = 0U;
-
-    HAL_TIM_Base_Start_IT(&htim6);
-}
 
 /* TIM6 中断里由 Current_Process 路由调用 */
-static void Noise_Tick(void)
-{
-    uint16_t raw_ext;
-    uint16_t raw = ReadBoth(&raw_ext);      /* 双路同拍 (外部仅观测) */
 
-    noise_ticks++;
 
-    if ((noise_ticks % TICKS_PER_SECOND) == 0U)
-    {
-        if (noise_samples < TOTAL_CYCLE)    /* 缓冲复用, 上限 6250 秒 */
-        {
-            voltage_buf[noise_samples] = raw;
-            noise_samples++;
-        }
-    }
-
-    if (noise_ticks >= (uint32_t)NOISE_MEASURE_SECONDS * TICKS_PER_SECOND)
-    {
-        noise_active = 0U;
-        HAL_TIM_Base_Stop_IT(&htim6);
-        Noise_Fit();
-        noise_done = 1U;
-    }
-}
-
-uint8_t Noise_IsFinished(void)
-{
-    return noise_done;
-}
-
-float Noise_GetBiasCurrent(void)
-{
-    return noise_bias_current;
-}
 
 /* 结果是否因压轨而不可信 (调用方应据此拒绝上报数值) */
-uint8_t Noise_IsSaturated(void)
-{
-    return noise_saturated;
-}
 
-uint16_t Noise_GetMinCode(void)
-{
-    return noise_min_code;
-}
 
-uint16_t Noise_GetMaxCode(void)
-{
-    return noise_max_code;
-}
 
-uint32_t Noise_GetElapsedSec(void)
-{
-    return noise_ticks / TICKS_PER_SECOND;
-}
 
-uint16_t Noise_GetSample(uint32_t index)
-{
-    if (index >= noise_samples)
-    {
-        return 0U;
-    }
-    return voltage_buf[index];
-}
-
-/* 已存点数。noise_samples 只在 Noise_Start 里清零, 跑完后保留,
- * 所以这也是"最近一次完整底噪序列"的长度 (W 指令回传用)。
- * 测量进行中调用会返回实时进度点数, 那是半截数据 —— 调用方自己注意 */
-uint32_t Noise_GetSampleCount(void)
-{
-    return noise_samples;
-}
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
