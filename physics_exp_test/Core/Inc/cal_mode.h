@@ -22,7 +22,7 @@
 #define CAL_ZERO  1
 #define CAL_BANG  2
 
-#define CAL_MODE  CAL_NONE
+#define CAL_MODE  CAL_BANG
 
 /* CAL_ZERO 单轮采样时长 (秒) */
 /* 单轮时长 (秒)。**不要设得太长**: 摆幅 8.6V / C=100pF -> 可积 860pC,

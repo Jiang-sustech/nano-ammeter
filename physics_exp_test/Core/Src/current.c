@@ -657,10 +657,14 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
     if (htim->Instance == TIM6)
     {
-#if CAL_MODE == CAL_NONE
-        Current_Process();
+#if CAL_MODE == CAL_ZERO
+        CalMode_Tick();     /* 零位检查: 自己的逐拍累加逻辑 (只读内置 ADC) */
 #else
-        CalMode_Tick();     /* 标定固件: 节拍路由到标定逻辑 */
+        /* 正常固件与 CAL_BANG 都要走模式一采样 —— CAL_BANG 就是"无输入的
+         * 连续模式一窗口", 靠 Current_Process 填电压缓冲、置 finish_flag。
+         * (原来的写法是 CAL_NONE 之外全走 CalMode_Tick, 而 CalMode_Tick 里
+         *  只有 CAL_ZERO 的代码, 于是 CAL_BANG 永远收不到样本、一行都不出。) */
+        Current_Process();
 #endif
     }
 }
