@@ -180,27 +180,10 @@ function testWaveCsvUnequalLengths() {
   assertCsvSane(csv2, 'wave CSV (反向前短)');
 }
 
-function testNoiseCsv() {
-  const noise = [65520, 65535, 0, 12345];
-  const csv = A.buildNoiseCsv(noise);
-  const lines = csv.split('\n');
-  assertCharsEqual(lines[0], 't_s,code', 'noise 表头');
-  assertTrue(dataLines(csv).length === noise.length,
-    `noise 行数应 ${noise.length}, 实得 ${dataLines(csv).length}`);
-  const rows = dataLines(csv).map(l => l.split(','));
-  rows.forEach((f, i) => {
-    assertTrue(Number(f[0]) === i, `noise 第 ${i} 行秒序号应为 ${i}, 实得 ${f[0]}`);
-    assertTrue(f[1] === String(noise[i]), `noise 第 ${i} 行码值应为 ${noise[i]}, 实得 ${f[1]}`);
-  });
-  assertCsvSane(csv, 'noise CSV');
-}
-
 function testCsvAsciiAndNoBom() {
   /* 每个产物都过一遍纯 ASCII / 无 BOM / 换行 检查 */
   assertCsvSane(A.buildWaveCsv(WAVE_INT, WAVE_EXT), 'wave CSV');
   assertCsvSane(A.buildWaveCsv(new Uint16Array(WAVE_INT), new Uint16Array(WAVE_EXT)), 'wave CSV (Uint16Array)');
-  assertCsvSane(A.buildNoiseCsv([1, 2, 3]), 'noise CSV');
-  assertCsvSane(A.buildNoiseCsv([]), 'noise CSV (空)');
   assertCsvSane(A.buildWaveCsv([], []), 'wave CSV (空)');
 }
 
@@ -218,7 +201,6 @@ function testCsvNoScientificNotationOrSeparators() {
   assertTrue(csv.indexOf('65535') > 0, '满码值 65535 应原样出现');
   assertTrue(csv.indexOf('65,535') < 0, '出现千分位分隔符');
   assertCsvSane(csv, 'wave CSV 大码值');
-  assertCsvSane(A.buildNoiseCsv(big), 'noise CSV 大码值');
 }
 
 function testEmptyInputsDoNotThrow() {
@@ -227,9 +209,6 @@ function testEmptyInputsDoNotThrow() {
     ['wave null/null', () => A.buildWaveCsv(null, null)],
     ['wave undefined/undefined', () => A.buildWaveCsv(undefined, undefined)],
     ['wave [ ] / null', () => A.buildWaveCsv([], null)],
-    ['noise 空', () => A.buildNoiseCsv([])],
-    ['noise null', () => A.buildNoiseCsv(null)],
-    ['noise undefined', () => A.buildNoiseCsv(undefined)],
   ];
   for (const [label, fn] of cases) {
     let out;
@@ -238,7 +217,6 @@ function testEmptyInputsDoNotThrow() {
   }
   /* 空输入只剩表头, 但末尾换行必须还在 */
   assertCharsEqual(A.buildWaveCsv([], []), 'index,t_us,code_int,code_ext\n', '空 wave CSV');
-  assertCharsEqual(A.buildNoiseCsv([]), 't_s,code\n', '空 noise CSV');
 }
 
 function testMetaRoundTrip() {
@@ -249,7 +227,7 @@ function testMetaRoundTrip() {
     result_na: 25.274,
     mode: 1,
     timeout: false,
-    points: { wave: 6250, wavex: 6250, noise: 50 },
+    points: { wave: 6250, wavex: 6250 },     /* 嵌套对象: 验证 pretty-print 逐层缩进 */
     notes: ['中文可以出现在 JSON 里', 'MATLAB/Origin 不读这个文件'],
   };
   const txt = A.buildMeta(fields);
@@ -304,7 +282,6 @@ const tests = [
   ['wave CSV t_us = 序号*160', testWaveCsvTUs],
   ['wave CSV 码值逐点对齐', testWaveCsvValues],
   ['wave CSV 长度不等留空', testWaveCsvUnequalLengths],
-  ['noise CSV 表头 + 行数', testNoiseCsv],
   ['CSV 纯 ASCII / 无 BOM', testCsvAsciiAndNoBom],
   ['CSV 无科学计数法/千分位', testCsvNoScientificNotationOrSeparators],
   ['空输入不抛异常', testEmptyInputsDoNotThrow],

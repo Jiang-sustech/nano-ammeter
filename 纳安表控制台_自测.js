@@ -155,7 +155,7 @@ function rnd() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed; }
 
 /* 按固件 main.c UART_DumpBuffer 构造字节流:
  * "<tag> <count>\r\n" + count*2 小端 u16 + 2 字节校验和(样本和) + 尾部文本
- * tag: WAVE (内置ADC波形) / WAVEX (ADS8866 波形) / NOISE (底噪逐秒序列) */
+ * tag: WAVE (内置ADC波形) / WAVEX (ADS8866 波形) */
 function waveBytes(count, samples, trailingText, tag = 'WAVE') {
   const out = [];
   for (const ch of (tag + ' ' + count + '\r\n')) out.push(ch.charCodeAt(0));
@@ -180,9 +180,6 @@ function testSetStatus() {
     ['MODE2 START (I<1nA)', '模式二运行中（双斜率）', 'run'],
     ['I=+12.345 nA MODE=1', '+12.345 nA', 'run'],
     ['I=-0.001 nA MODE=2', '-0.001 nA', 'run'],
-    ['NOISE START (50s)', '底噪标定中', 'noise'],
-    ['NOISE 10/50s', 'NOISE 10/50s', 'noise'],
-    ['IBIAS=+123.4 fA', '偏置 +123.4 fA', 'noise'],
     ['RESULT NONE', '暂无结果', 'idle'],
     /* D 查询成功行: 必须带 (模式n), 否则被通用 I= 正则截获 */
     ['RESULT I=+0.500 nA MODE=2', '+0.500 nA（模式2）', 'run'],
@@ -224,8 +221,8 @@ function testWaveSameChunk() {
   assert.ok(els['waveInfo'].textContent.includes('8 点'), 'waveInfo 应显示点数');
   assert.ok(logText().includes('校验和 OK ✓'), '校验和应通过');
   /* 再喂文本, 证明没有卡在二进制模式 */
-  onChunk(new TextEncoder().encode('NOISE 10/50s\r\n'));
-  assert.strictEqual(els['screenState'].textContent, 'NOISE 10/50s');
+  onChunk(new TextEncoder().encode('MODE2 START (I<1nA)\r\n'));
+  assert.strictEqual(els['screenState'].textContent, '模式二运行中（双斜率）');
   /* CSV 内容逐点校验: 表头英文, t_us = 序号×160, 外部路缺省留空 */
   els['btnCsv'].click();
   assert.strictEqual(BlobCapture.last._parts.join(''),
@@ -274,9 +271,9 @@ async function testUnplugReconnectEvent() {
   assert.strictEqual(els['screenState'].textContent, '—— 未连接 ——');
   currentPort = makeFakePort('P2');
   await connect();
-  els['btnNoise'].click();
+  els['btnWaveX'].click();
   await tick(60);
-  assert.ok(currentPort._writes.some(w => w.includes('N')), '重连后 N 指令应送达新端口');
+  assert.ok(currentPort._writes.some(w => w.includes('X')), '重连后 X 指令应送达新端口');
   assert.ok(!logText().includes('发送失败'), '不应出现发送失败');
 }
 
@@ -319,7 +316,7 @@ function testBackToBack() {
   const w1 = waveBytes(4, [1, 2, 3, 4], '');
   const w2 = waveBytes(4, [5, 6, 7, 8], '\r\nI=+9.000 nA MODE=1\r\n');
   onChunk(new Uint8Array(w1.concat(w2)));
-  const hits = logText().match(/接收 (WAVE|WAVEX|NOISE) 完成/g);
+  const hits = logText().match(/接收 (WAVE|WAVEX) 完成/g);
   assert.strictEqual(hits && hits.length, 2, '应完成两次波形接收');
   assert.strictEqual(els['screenState'].textContent, '+9.000 nA');
   els['btnCsv'].click();
@@ -400,7 +397,7 @@ async function testBusyReply() {
   assert.strictEqual(els['btnStart'].disabled, false);
 }
 
-/* T13: 测量/底噪期间 S/N/手动发送自动禁用, 结果后恢复 */
+/* T13: 测量期间 S/手动发送自动禁用, 结果后恢复 */
 async function testBusyDisable() {
   setup();
   currentPort = makeFakePort('P1');
@@ -411,7 +408,6 @@ async function testBusyDisable() {
   push('START MODE1\r\n');
   await tick(60);
   assert.strictEqual(els['btnStart'].disabled, true, '测量中 S 应禁用');
-  assert.strictEqual(els['btnNoise'].disabled, true, '测量中 N 应禁用');
   assert.strictEqual(els['btnSend'].disabled, true, '测量中手动发送应禁用');
   assert.strictEqual(els['btnQuery'].disabled, false, 'D 查询应保持可用');
   assert.strictEqual(els['btnWave'].disabled, false, 'B 应保持可用');
@@ -421,19 +417,7 @@ async function testBusyDisable() {
   push('I=+12.345 nA MODE=1\r\n');
   await tick(60);
   assert.strictEqual(els['btnStart'].disabled, false, '结果后 S 应恢复');
-  assert.strictEqual(els['btnNoise'].disabled, false, '结果后 N 应恢复');
   assert.strictEqual(els['btnSend'].disabled, false, '结果后手动发送应恢复');
-
-  /* 底噪流程: 进度行不改变禁用, IBIAS 后恢复 */
-  push('NOISE START (50s)\r\n');
-  await tick(60);
-  assert.strictEqual(els['btnStart'].disabled, true, '底噪中 S 应禁用');
-  push('NOISE 10/50s\r\n');
-  await tick(60);
-  assert.strictEqual(els['btnStart'].disabled, true, '底噪进度中仍禁用');
-  push('IBIAS=+123.4 fA\r\n');
-  await tick(60);
-  assert.strictEqual(els['btnStart'].disabled, false, 'IBIAS 后应恢复');
 
   /* MODE2 流程 */
   push('START MODE1\r\n');
@@ -453,7 +437,7 @@ async function testBusyDisable() {
   assert.strictEqual(els['btnStart'].disabled, false, 'RESULT 响应后应恢复');
 
   /* 板子重启 (READY) 也应清 busy */
-  push('NOISE START (50s)\r\n');
+  push('START MODE1\r\n');
   await tick(60);
   assert.strictEqual(els['btnStart'].disabled, true);
   push('NANO-AMMETER READY\r\n');
@@ -461,7 +445,7 @@ async function testBusyDisable() {
   assert.strictEqual(els['btnStart'].disabled, false, 'READY(重启)应恢复按钮');
 }
 
-/* ---- 以下为 X / W 指令扩展 (WAVEX / NOISE 包头) ----
+/* ---- 以下为 X 指令扩展 (WAVEX 包头) ----
  * 三者共用同一种二进制块格式, 只有包头字不同 (固件 main.c UART_DumpBuffer)。
  * 解析状态必须按 tag 分流, 否则 X 的数据会覆盖 B 的, 或 W 的覆盖 X 的。 */
 
@@ -475,17 +459,6 @@ function testWavexSingleChunk() {
   assert.deepStrictEqual(Array.from(getWaveData()), before, 'WAVEX 不得覆盖内置波形 waveData');
   assert.ok(logText().includes('WAVEX'), '日志应记录 WAVEX 接收');
   assert.ok(logText().includes('校验和 OK ✓'), 'WAVEX 校验和应通过');
-}
-
-/* T17: NOISE 单包 (50 点, 逐秒序列) */
-function testNoiseSingleChunk() {
-  setup();
-  const ns = Array.from({ length: 50 }, (_, i) => 30000 + i * 7);
-  onChunk(new Uint8Array(waveBytes(50, ns, '', 'NOISE')));
-  assert.strictEqual(getNoiseData().length, 50, 'NOISE 应为 50 点');
-  assert.strictEqual(getNoiseData()[0], 30000);
-  assert.strictEqual(getNoiseData()[49], 30000 + 49 * 7);
-  assert.ok(logText().includes('校验和 OK ✓'), 'NOISE 校验和应通过');
 }
 
 /* T18: 背靠背 WAVE + WAVEX 同一包 -> 两块都要完整落地 */
@@ -515,15 +488,14 @@ function testWavexRandomSplits() {
   }
 }
 
-/* T20: 三种包头连续, 各自落到各自槽位; 校验和失败的块不得污染槽位 */
-function testThreeTagsIsolated() {
+/* T20: 两种包头连续, 各自落到各自槽位; 校验和失败的块不得污染槽位 */
+function testTwoTagsIsolated() {
   setup();
   onChunk(new Uint8Array(waveBytes(3, [1, 2, 3], '', 'WAVE')));
   onChunk(new Uint8Array(waveBytes(3, [4, 5, 6], '', 'WAVEX')));
-  onChunk(new Uint8Array(waveBytes(3, [7, 8, 9], '', 'NOISE')));
-  assert.deepStrictEqual(Array.from(getWaveData()), [1, 2, 3]);
-  assert.deepStrictEqual(Array.from(getWaveExtData()), [4, 5, 6]);
-  assert.deepStrictEqual(Array.from(getNoiseData()), [7, 8, 9]);
+  onChunk(new Uint8Array(waveBytes(3, [7, 8, 9], '', 'WAVE')));   /* 第二波覆盖内置槽 */
+  assert.deepStrictEqual(Array.from(getWaveData()), [7, 8, 9], '后到的 WAVE 应覆盖内置槽');
+  assert.deepStrictEqual(Array.from(getWaveExtData()), [4, 5, 6], 'WAVE 不得动外部槽');
 
   /* 坏校验和的 WAVEX: 必须报错, 且不得覆盖上一份好数据 */
   const bad = waveBytes(3, [4, 5, 6], '', 'WAVEX');
@@ -533,23 +505,26 @@ function testThreeTagsIsolated() {
   assert.deepStrictEqual(Array.from(getWaveExtData()), [4, 5, 6], '坏块不得覆盖槽位');
 }
 
-/* T21: 底噪进度行 "NOISE 10/50s" 不得被当成二进制包头
- * 它开头同样是 "NOISE <数字>", 宽松匹配会吞掉后面 22 字节当二进制,
- * 导致整条数据流错位 (固件底噪期间每 10s 发一行) */
-function testNoiseProgressNotAHeader() {
+/* T21: 包头必须整行精确匹配 —— 字头相同但后面带多余内容的行不得被当成包头。
+ * 宽松匹配 (/^WAVE (\d+)/ 不锚定 $) 会把 "WAVE 8 别的什么" 读成"N=8 的块",
+ * 然后吞掉后面 18 字节当二进制, 整条数据流从此错位。 */
+function testHeaderNeedsExactLine() {
   setup();
-  onChunk(new TextEncoder().encode(
-    'NOISE START (50s)\r\nNOISE 10/50s\r\nNOISE 20/50s\r\nIBIAS=+123.4 fA\r\n'));
-  assert.ok(!logText().includes('开始接收'), '进度行不得进入二进制接收模式');
-  /* 桩里的元素是按需创建的, 这里没收到块 -> els['waveInfo'] 可能不存在,
-   * 走 document.getElementById 与脚本同一条路 */
-  assert.strictEqual(document.getElementById('waveInfo').textContent, '', '进度行不得触发块接收');
-  assert.strictEqual(els['screenState'].textContent, '偏置 +123.4 fA',
-    '进度行之后的文本仍应逐行正常解析');
-  assert.strictEqual(getNoiseData(), null, '不得凭空造出底噪数据');
+  const probes = ['WAVE 8 多余内容', 'WAVEX 8/50s', 'WAVE 8点', 'WAVE abc'];
+  for (const probe of probes) {
+    onChunk(new TextEncoder().encode(probe + '\r\n'));
+  }
+  assert.ok(!logText().includes('开始接收'),
+    '字头后带多余内容的行不得进入二进制接收模式');
+  /* 桩里的元素按需创建, 走 document.getElementById 与脚本同一条路 */
+  assert.strictEqual(document.getElementById('waveInfo').textContent, '',
+    '这些行不得触发块接收');
+  /* 真正的包头仍然要正常识别 */
+  onChunk(new Uint8Array(waveBytes(3, [1, 2, 3], '', 'WAVE')));
+  assert.deepStrictEqual(Array.from(getWaveData()), [1, 2, 3], '合法包头仍应正常工作');
 }
 
-/* T22: 新增按钮 (E/X/W) 发出的指令正确, 且下载中互相禁用 */
+/* T22: 按钮 (E/X/B) 发出的指令正确, 且未连接时全部禁用 */
 async function testNewButtons() {
   setup();
   currentPort = makeFakePort('P1');
@@ -559,14 +534,14 @@ async function testNewButtons() {
   assert.ok(writes().includes('E'), 'E 按钮应发 E');
   els['btnWaveX'].click();       await tick(60);
   assert.ok(writes().includes('X'), 'X 按钮应发 X');
-  els['btnNoiseSeries'].click(); await tick(60);
-  assert.ok(writes().includes('W'), 'W 按钮应发 W');
+  els['btnWave'].click();        await tick(60);
+  assert.ok(writes().includes('B'), 'B 按钮应发 B');
 
-  /* 未连接时四个按钮都必须禁用 */
+  /* 未连接时全部禁用 */
   setup();
   assert.strictEqual(els['btnDiag'].disabled, true, '未连接时 E 应禁用');
   assert.strictEqual(els['btnWaveX'].disabled, true, '未连接时 X 应禁用');
-  assert.strictEqual(els['btnNoiseSeries'].disabled, true, '未连接时 W 应禁用');
+  assert.strictEqual(els['btnWave'].disabled, true, '未连接时 B 应禁用');
 }
 
 /* ---- 图表 (阶段三) ---- */
@@ -670,11 +645,10 @@ function testExportPng() {
     ['T14 设备识别 (ST-Link 警告)', testWrongDeviceWarning],
     ['T15 中途打开页面 BUSY 同步', testBusyReply],
     ['T16 WAVEX 单包 (X 指令)', testWavexSingleChunk],
-    ['T17 NOISE 单包 (W 指令)', testNoiseSingleChunk],
     ['T18 背靠背 WAVE+WAVEX 同包', testBackToBackMixedTags],
     ['T19 WAVEX 随机分包 ×25', testWavexRandomSplits],
-    ['T20 三种包头隔离 + 坏校验和不污染', testThreeTagsIsolated],
-    ['T21 底噪进度行不得当包头', testNoiseProgressNotAHeader],
+    ['T20 两种包头隔离 + 坏块不污染', testTwoTagsIsolated],
+    ['T21 包头须整行精确匹配', testHeaderNeedsExactLine],
     ['T22 新增按钮 E/X/W 指令', testNewButtons],
     ['T23 niceTicks 整齐刻度', testNiceTicks],
     ['T24 chartRange 含阈值线', testChartRange],

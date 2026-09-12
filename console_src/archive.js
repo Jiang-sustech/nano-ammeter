@@ -1,7 +1,7 @@
 /**
  * 数据存档纯函数模块 (无 DOM、无全局变量依赖, 可被 <script> 原样内联)
  *
- * 职责: 把串口收到的原始数据转成存档文件文本 —— 波形/底噪 -> CSV,
+ * 职责: 把串口收到的原始数据转成存档文件文本 —— 波形 -> CSV,
  *       测量元数据 -> JSON 字符串。CSV 给 MATLAB readmatrix 和 Origin 用。
  *
  * CSV 硬约束 (中文 Windows 上 MATLAB 与 Origin 对 UTF-8 的处理不一致,
@@ -74,18 +74,6 @@ function buildWaveCsv(intArr, extArr) {
 }
 
 /**
- * 底噪序列 CSV (1 点/秒)。表头 "t_s,code", 每行: 秒序号, 码值, 末尾换行。
- */
-function buildNoiseCsv(noiseArr) {
-  var a = asArray(noiseArr);
-  var out = 't_s,code\n';
-  for (var i = 0; i < a.length; i++) {
-    out += i + ',' + fmtCode(a[i]) + '\n';
-  }
-  return out;
-}
-
-/**
  * 元数据 JSON 字符串 (缩进 2 空格)。fields 原样序列化, 允许中文。
  */
 function buildMeta(fields) {
@@ -98,7 +86,6 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     captureStem: captureStem,
     buildWaveCsv: buildWaveCsv,
-    buildNoiseCsv: buildNoiseCsv,
     buildMeta: buildMeta,
   };
 }

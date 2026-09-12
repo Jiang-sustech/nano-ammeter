@@ -73,7 +73,7 @@
   button.primary { background: #1f6feb; border-color: #1f6feb; }
   button.primary:hover { background: #2f81f7; }
 
-  .ctrl-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  .ctrl-grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
   .ctrl-btn {
     display: flex;
     flex-direction: column;
@@ -88,8 +88,6 @@
   .ctrl-btn .hint { font-size: 0.75rem; color: var(--dim); font-weight: 400; }
   #btnStart  { background: rgba(63,185,80,0.12);  border-color: var(--green); color: var(--green); }
   #btnStart:hover  { background: rgba(63,185,80,0.25); }
-  #btnNoise  { background: rgba(210,153,34,0.12); border-color: var(--amber); color: var(--amber); }
-  #btnNoise:hover  { background: rgba(210,153,34,0.25); }
   .ctrl-btn:disabled { opacity: 0.3; }
 
   .sub-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
@@ -181,10 +179,6 @@
       <span class="icon">▶</span>单次测量
       <span class="hint">指令 S · 测完自动回空闲 · 快捷键 S</span>
     </button>
-    <button class="ctrl-btn" id="btnNoise" disabled>
-      <span class="icon">∿</span>底噪标定
-      <span class="hint">指令 N · 50 秒</span>
-    </button>
   </div>
   <div class="sub-grid" style="margin-top:14px">
     <button id="btnQuery" disabled>🔎 查询最近结果（D）</button>
@@ -193,9 +187,6 @@
   <div class="sub-grid" style="margin-top:14px">
     <button id="btnWave" disabled>📈 内置 ADC 波形（B）</button>
     <button id="btnWaveX" disabled>📊 ADS8866 波形（X）</button>
-  </div>
-  <div class="sub-grid" style="margin-top:14px">
-    <button id="btnNoiseSeries" disabled>📉 底噪逐秒序列（W）</button>
   </div>
 </div>
 
@@ -234,7 +225,7 @@
 
 <footer>
   <b>使用说明：</b>① 打开台式电源给板子供电 → ② 板载 USB-C 插到电脑 → ③ 本页用 <b>Chrome / Edge</b> 打开 → ④ 点「连接串口」选 CH340 (COM 口) → ⑤ 点「单次测量」：一次点击 = 一次完整测量（1 秒窗口，<1nA 自动接 10 秒双斜率），测完自动停住显示结果。<br>
-  <b>注意：</b>烧录固件用 ST-Link；本页只负责控制与数据回传（115200 8N1）。测量/底噪期间 S/N 与手动发送自动禁用（结果上报后自动恢复）；板子忙时收到的指令会被丢弃并回 BUSY（本页按钮同步变灰），不会排队执行。若页面在板子测量中途打开，连接后的自动 D 查询会收到 BUSY，按钮自动变灰直到测量结束。快捷键 S / N 与按钮等效（输入框聚焦时除外）。
+  <b>注意：</b>烧录固件用 ST-Link；本页只负责控制与数据回传（115200 8N1）。测量期间 S 与手动发送自动禁用（结果上报后自动恢复）；板子忙时收到的指令会被丢弃并回 BUSY（本页按钮同步变灰），不会排队执行。若页面在板子测量中途打开，连接后的自动 D 查询会收到 BUSY，按钮自动变灰直到测量结束。快捷键 S 与按钮等效（输入框聚焦时除外）。
 </footer>
 
 <script>
@@ -255,17 +246,15 @@ let rawBuf = [];        /* 未完成文本行的原始字节 (字节级缓存, �
 let waveMode = null;    /* 二进制接收状态: {tag, need, bytes} */
 let waveData = null;    /* B: 最近窗口波形 (内置 ADC, Uint16Array) */
 let waveExtData = null; /* X: 同一窗口波形 (ADS8866 外部 16 位) */
-let noiseData = null;   /* W: 底噪逐秒序列 (50 点) */
 let lastResultLine = ''; /* 最近一条 I= 结果行, 用于给导出的文件命名 */
 let logLines = [];       /* 固件说过的每一行, 原样留档 (对应 Python 脚本的 TRANSCRIPT) */
-let busy = false;       /* 测量/底噪进行中 (禁用 S/N 与手动发送, 防指令被固件缓存排队) */
+let busy = false;       /* 测量进行中 (禁用 S 与手动发送, 防指令被固件缓存排队) */
 
 /* 三种二进制块 (B/X/W) 共用一种格式, 只有包头字不同 (固件 UART_DumpBuffer)。
  * 收到包头后按 tag 分流, 否则 X 的数据会覆盖 B 的、W 的会覆盖 X 的。
  * 用函数形式暴露 (而非 let 变量), 供导出/绘图/自测读取 */
 function getWaveData()    { return waveData; }
 function getWaveExtData() { return waveExtData; }
-function getNoiseData()   { return noiseData; }
 function getThresholds()  { return { lower: CODE_LOWER, upper: CODE_UPPER, zero: CODE_ZERO }; }
 
 const $ = id => document.getElementById(id);
@@ -291,17 +280,15 @@ function updateButtons() {
   const on = !!port;
   const idle = !on || waveMode !== null;   /* 下载中防连点 (三种块共用一条通道) */
   $('btnStart').disabled  = !on || busy;
-  $('btnNoise').disabled  = !on || busy;
   $('btnSend').disabled   = !on || busy;
   $('btnQuery').disabled  = !on || waveMode !== null;
   $('btnDiag').disabled   = idle;
   $('btnWave').disabled   = idle;
   $('btnWaveX').disabled  = idle;
-  $('btnNoiseSeries').disabled = idle;
 }
 
-/* 测量/底噪期间禁发指令: 固件是缓存排队而非忽略, 禁用以防误操作;
- * 结果行 / IBIAS / RESULT 响应 / READY 均意味着固件已回空闲 */
+/* 测量期间禁发指令: 固件是缓存排队而非忽略, 禁用以防误操作;
+ * 结果行 / RESULT 响应 / READY 均意味着固件已回空闲 */
 function setBusy(b) {
   busy = b;
   updateButtons();
@@ -330,7 +317,6 @@ function setConnected(on, name) {
  *   NANO-AMMETER READY / START MODE1 / STOP IDLE (固件暂未发送, 预留)
  *   I=+12.345 nA MODE=1/2   (每秒自动上报)
  *   MODE2 START (I<1nA)     (模式二自动进入)
- *   NOISE START (50s) / NOISE 10/50s / IBIAS=+123.4 fA
  *   RESULT I=... MODE=..    (D 查询) */
 function setStatus(raw) {
   $('lastRaw').textContent = raw;
@@ -353,15 +339,11 @@ function setStatus(raw) {
     setBusy(false);
     return;
   }
-  const b = raw.match(/IBIAS=([+-][0-9]+\.[0-9]+) fA/);
-  if (b) { el.textContent = `偏置 ${b[1]} fA`; el.className = 'noise'; setBusy(false); return; }
   if (raw.includes('MODE2 START')) { el.textContent = '模式二运行中（双斜率）'; el.className = 'run'; setBusy(true); return; }
-  if (raw.includes('NOISE START')) { el.textContent = '底噪标定中'; el.className = 'noise'; setBusy(true); return; }
-  if (/NOISE \d+\/50s/.test(raw)) { el.textContent = raw; el.className = 'noise'; return; }
   if (raw.includes('STOP IDLE')) {
     setBusy(false);
     /* 结果行刚显示过数值时不覆盖; 只把瞬态文字换成"已停止" */
-    if (/运行中|标定中|NOISE \d+\/50s|等待|未连接/.test(el.textContent)) {
+    if (/运行中|等待|未连接/.test(el.textContent)) {
       el.textContent = '已停止';
       el.className = 'idle';
     }
@@ -379,11 +361,11 @@ function onTextLine(t) {
   logLines.push(t);                  /* 留档: 导出的 meta.json 里带上全部协议行 */
   log('← ' + t, 'rx');
   setStatus(t);
-  /* 二进制块回传头: "<tag> <count>" -> 进入二进制接收 (B=WAVE / X=WAVEX / W=NOISE)
-   * 必须整行精确匹配 (用 $ 收尾): 底噪进度行 "NOISE 10/50s" 开头同样是
-   * "NOISE <数字>", 宽松匹配会把这行当成包头, 吞掉后面 22 字节当二进制,
-   * 导致整条数据流错位 —— 固件回传头恰好是 "<tag> <count>\r\n", 无多余内容 */
-  const wm = t.match(/^(WAVE|WAVEX|NOISE) (\d+)$/);
+  /* 二进制块回传头: "<tag> <count>" -> 进入二进制接收 (B=WAVE / X=WAVEX)
+   * 必须整行精确匹配 (用 $ 收尾): 固件还有别的行以同样字头开头, 宽松匹配会把
+   * 它们当成包头, 吞掉后面若干字节当二进制, 导致整条数据流错位。
+   * 固件回传头恰好是 "<tag> <count>\r\n", 无多余内容 */
+  const wm = t.match(/^(WAVE|WAVEX) (\d+)$/);
   if (wm) {
     const count = parseInt(wm[2], 10);
     if (count > 0) {
@@ -414,19 +396,16 @@ function onWaveComplete(wm) {
   }
   log(`接收 ${wm.tag} 完成: ${count} 点, 校验和 OK ✓`, 'rx');
 
-  if (wm.tag === 'WAVE')       { waveData = data; }
-  else if (wm.tag === 'WAVEX') { waveExtData = data; }
-  else                         { noiseData = data; }
+  if (wm.tag === 'WAVE') { waveData = data; }
+  else                   { waveExtData = data; }
 
   drawChart(wm.tag);
   $('btnCsv').disabled = false;
   $('btnPng').disabled = false;
   $('btnMeta').disabled = false;
   updateButtons();
-  /* 底噪是 1 点/秒, 与波形的 160µs/点不同轴 */
-  $('waveInfo').textContent = (wm.tag === 'NOISE')
-    ? `${count} 点 · 1 点/秒 (共 ${count} 秒)`
-    : `${count} 点 × 160µs ≈ ${(count*0.16).toFixed(0)} ms · 阈值线: code_lower=${CODE_LOWER} (0.131V), code_upper=${CODE_UPPER} (2.969V)`;
+  $('waveInfo').textContent =
+    `${count} 点 × 160µs ≈ ${(count*0.16).toFixed(0)} ms · 阈值线: code_lower=${CODE_LOWER} (0.131V), code_upper=${CODE_UPPER} (2.969V)`;
   $('waveInfo').style.display = 'block';
 }
 
@@ -440,7 +419,7 @@ function onWaveComplete(wm) {
 /**
  * 数据存档纯函数模块 (无 DOM、无全局变量依赖, 可被 <script> 原样内联)
  *
- * 职责: 把串口收到的原始数据转成存档文件文本 —— 波形/底噪 -> CSV,
+ * 职责: 把串口收到的原始数据转成存档文件文本 —— 波形 -> CSV,
  *       测量元数据 -> JSON 字符串。CSV 给 MATLAB readmatrix 和 Origin 用。
  *
  * CSV 硬约束 (中文 Windows 上 MATLAB 与 Origin 对 UTF-8 的处理不一致,
@@ -513,18 +492,6 @@ function buildWaveCsv(intArr, extArr) {
 }
 
 /**
- * 底噪序列 CSV (1 点/秒)。表头 "t_s,code", 每行: 秒序号, 码值, 末尾换行。
- */
-function buildNoiseCsv(noiseArr) {
-  var a = asArray(noiseArr);
-  var out = 't_s,code\n';
-  for (var i = 0; i < a.length; i++) {
-    out += i + ',' + fmtCode(a[i]) + '\n';
-  }
-  return out;
-}
-
-/**
  * 元数据 JSON 字符串 (缩进 2 空格)。fields 原样序列化, 允许中文。
  */
 function buildMeta(fields) {
@@ -537,7 +504,6 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     captureStem: captureStem,
     buildWaveCsv: buildWaveCsv,
-    buildNoiseCsv: buildNoiseCsv,
     buildMeta: buildMeta,
   };
 }
@@ -599,9 +565,8 @@ function drawChart(tag) {
   const ctx = cv.getContext('2d');
   ctx.scale(devicePixelRatio, devicePixelRatio);
 
-  const isNoise = (tag === 'NOISE');
-  const dInt = isNoise ? noiseData : waveData;      /* ADG 全断时没有内置/外部分别 */
-  const dExt = isNoise ? null : waveExtData;
+  const dInt = waveData;
+  const dExt = waveExtData;
   const n = Math.max(dInt ? dInt.length : 0, dExt ? dExt.length : 0);
 
   const px = PAD.L, py = PAD.T;
@@ -612,7 +577,7 @@ function drawChart(tag) {
   ctx.fillRect(0, 0, W, CHART_H);
   if (!n) return;
 
-  const rng = chartRange(dInt, dExt, !isNoise);
+  const rng = chartRange(dInt, dExt, true);   /* 范围必须含两条阈值线 */
   const ty = niceTicks(rng.lo, rng.hi, 6);
   rng.lo = ty.lo; rng.hi = ty.hi;                   /* 用整齐刻度当范围 */
   const X = (i) => px + (n === 1 ? 0 : i / (n - 1) * pw);
@@ -639,18 +604,18 @@ function drawChart(tag) {
     ctx.strokeStyle = CLR.grid;
     ctx.beginPath(); ctx.moveTo(x, py); ctx.lineTo(x, py + ph); ctx.stroke();
     ctx.fillStyle = CLR.text;
-    ctx.fillText(isNoise ? (t + 's') : ((t * 0.16).toFixed(0) + ''), x, py + ph + 6);
+    ctx.fillText((t * 0.16).toFixed(0) + '', x, py + ph + 6);
   }
   ctx.fillStyle = CLR.text;
-  ctx.fillText(isNoise ? '时间 (秒)' : '时间 (ms, 160µs/点)', px + pw / 2, py + ph + 18);
+  ctx.fillText('时间 (ms, 160µs/点)', px + pw / 2, py + ph + 18);
   ctx.save();
   ctx.translate(13, py + ph / 2);
   ctx.rotate(-Math.PI / 2);
   ctx.fillText('原始码', 0, 0);
   ctx.restore();
 
-  /* --- 阈值虚线 (仅波形) --- */
-  if (!isNoise) {
+  /* --- 阈值虚线 --- */
+  {
     ctx.setLineDash([5, 5]);
     ctx.strokeStyle = CLR.thr;
     [CODE_LOWER, CODE_UPPER].forEach((th, k) => {
@@ -677,16 +642,13 @@ function drawChart(tag) {
     }
     ctx.stroke();
   };
-  if (!isNoise) line(dExt, CLR.ext, 0.9);   /* 外部 16 位在下层 */
-  line(dInt, isNoise ? CLR.thr : CLR.int, isNoise ? 1.6 : 1.1);
+  line(dExt, CLR.ext, 0.9);                 /* 外部 16 位在下层 */
+  line(dInt, CLR.int, 1.1);                 /* 内置 ADC 在上层 */
 
   /* --- 图例 --- */
   const items = [];
-  if (isNoise) items.push([CLR.thr, '底噪序列 (ADG 全断, 1 点/秒)']);
-  else {
-    if (dExt) items.push([CLR.ext, 'ADS8866 16 位 (观测)']);
-    if (dInt) items.push([CLR.int, '内置 ADC12 (控制)']);
-  }
+  if (dExt) items.push([CLR.ext, 'ADS8866 16 位 (观测)']);
+  if (dInt) items.push([CLR.int, '内置 ADC12 (控制)']);
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   items.forEach(([c, label], k) => {
@@ -887,21 +849,17 @@ navigator.serial?.addEventListener('disconnect', e => {
 $('btnConnect').onclick = connect;
 $('btnDisconnect').onclick = disconnect;
 $('btnStart').onclick = () => send('S');
-$('btnNoise').onclick = () => send('N');
 $('btnQuery').onclick = () => send('D');
 $('btnDiag').onclick = () => send('E');
 $('btnWave').onclick = () => { $('btnCsv').disabled = true; send('B'); };
 $('btnWaveX').onclick = () => send('X');
-$('btnNoiseSeries').onclick = () => send('W');
 $('btnPng').onclick = exportPng;
-/* CSV 导出: 有底噪序列就导底噪, 否则导波形 (双路合并成一个文件, 便于
- * MATLAB/Origin 一次读入两路对照)。表头纯英文, 无 BOM, 见 console_src/archive.js */
+/* CSV 导出: 双路合并成一个文件, 便于 MATLAB/Origin 一次读入两路对照。
+ * 表头纯英文、无 BOM, 见 console_src/archive.js */
 $('btnCsv').onclick = () => {
-  const stem = captureStem(lastResultLine, ymdNow());
-  if (noiseData && noiseData.length) {
-    download(buildNoiseCsv(noiseData), stem + '_noise.csv', 'text/csv');
-  } else if ((waveData && waveData.length) || (waveExtData && waveExtData.length)) {
-    download(buildWaveCsv(waveData, waveExtData), stem + '_wave.csv', 'text/csv');
+  if ((waveData && waveData.length) || (waveExtData && waveExtData.length)) {
+    download(buildWaveCsv(waveData, waveExtData),
+             captureStem(lastResultLine, ymdNow()) + '_wave.csv', 'text/csv');
   } else {
     log('没有可导出的数据', 'err');
   }
@@ -915,7 +873,6 @@ $('btnMeta').onclick = () => {
     结果行: lastResultLine,
     内置点数: waveData ? waveData.length : 0,
     外部点数: waveExtData ? waveExtData.length : 0,
-    底噪点数: noiseData ? noiseData.length : 0,
     通信记录: logLines,
   }), captureStem(lastResultLine, ymdNow()) + '_meta.json', 'application/json');
 };
@@ -936,7 +893,6 @@ document.addEventListener('keydown', e => {
   if (tag === 'INPUT' || tag === 'TEXTAREA') return;
   const k = e.key.toUpperCase();
   if (k === 'S') $('btnStart').click();
-  else if (k === 'N') $('btnNoise').click();
 });
 
 log('控制台就绪。连接串口后即可控制仪器。', 'sys');
