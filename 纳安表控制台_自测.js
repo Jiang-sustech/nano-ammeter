@@ -650,65 +650,6 @@ function testExportPng() {
     `超时 PNG 文件名不符: ${lastAnchor && lastAnchor.download}`);
 }
 
-/* T27: 内联后的统计函数必须仍与 Python 实现一致 (真实数据交叉验证)
- * 夹具 console_src/ref_data.json 是 2026-09-11 的实采数据 (6250 点双路 + 50 点底噪),
- * 参考值来自 tools/nanoammeter_capture.py 的 plot_only() 实际输出。
- * 这条测试同时守住两件事: 内联没有改动函数行为, 以及移植本身是对的。 */
-function testStatsMatchPython() {
-  setup();
-  const ref = JSON.parse(fs.readFileSync(
-    path.join(__dirname, 'console_src', 'ref_data.json'), 'utf8'));
-  const wi = ref.wave_int, we = ref.wave_ext, ns = ref.noise;
-
-  const s = arrStats(wi);
-  assert.strictEqual(s.min, 2288, 'WAVE min');
-  assert.strictEqual(s.max, 65520, 'WAVE max');
-  assert.strictEqual(s.span, 63232, 'WAVE span');
-  assert.strictEqual(+s.mean.toFixed(1), 31417.9, 'WAVE mean');
-
-  const se = arrStats(we);
-  assert.strictEqual(se.min, 2243, 'WAVEX min');
-  assert.strictEqual(se.max, 65535, 'WAVEX max');
-  assert.strictEqual(se.span, 63292, 'WAVEX span');
-
-  assert.strictEqual(leadingSaturatedPrefix(wi), 38, '开头压轨前缀');
-  assert.strictEqual(countBadReads(we), 37, '外部坏读计数');
-
-  const d = diffStats(wi, we);
-  assert.strictEqual(d.n, 6213, '有效配对数');
-  assert.strictEqual(+d.mean.toFixed(2), 36.34, '外部-内置 均值');
-  assert.strictEqual(+d.rms.toFixed(2), 93.46, '外部-内置 rms');
-  assert.strictEqual(d.maxAbs, 370, '外部-内置 最大偏差');
-
-  /* 相关性/拟合必须先滤坏读 (函数本身不剔除) */
-  const av = [], ev = [];
-  for (let i = 0; i < Math.min(wi.length, we.length); i++) {
-    if (we[i] !== 0 && we[i] !== 0xFFFF) { av.push(wi[i]); ev.push(we[i]); }
-  }
-  assert.strictEqual(+correlation(av, ev).toFixed(6), 0.999986, '相关系数');
-  const f = linearFit(av, ev);
-  assert.strictEqual(+f.k.toFixed(4), 1.0004, '拟合斜率');
-  assert.strictEqual(+f.b.toFixed(2), 22.55, '拟合截距');
-
-  /* 上升沿阈值必须落在稳态摆幅中段 (本页用零位码, 由常量算出 = 30782)。
-   * Python 脚本里硬编码的是 30787, 两者差 5 码但都在中段, 结论一致 ——
-   * 这里断言"两者等价", 而不是死磕某个具体数值 */
-  const TH = getThresholds();
-  assert.ok(TH.zero > TH.lower && TH.zero < TH.upper, '零位码应落在两阈值之间');
-  const edges = risingEdges(wi, TH.zero);
-  assert.strictEqual(edges.length, 21, '上升沿个数');
-  assert.strictEqual(edgePeriod(wi, TH.zero), 301, '上升沿平均周期');
-  assert.strictEqual(risingEdges(wi, 30787).length, edges.length,
-    '阈值 30782 与 Python 用的 30787 结论应一致');
-  /* 用上阈值当判据则几乎数不到沿 —— 稳态峰值 58962 在它之下 */
-  assert.ok(risingEdges(wi, TH.upper).length < 21,
-    '用上阈值当判据应当数不到沿 —— 这正是零位码的由来');
-
-  /* 底噪: 50 点全饱和, 必须被判定为压轨 (斜率无意义) */
-  assert.strictEqual(arrStats(ns).min, 65520);
-  assert.strictEqual(arrStats(ns).max, 65520);
-}
-
 /* ---------------- 运行 ---------------- */
 (async function main() {
   console.log('纳安表控制台自测');
@@ -739,7 +680,6 @@ function testStatsMatchPython() {
     ['T24 chartRange 含阈值线', testChartRange],
     ['T25 双路叠加图例与阈值标注', testOverlayBothTraces],
     ['T26 PNG 导出命名', testExportPng],
-    ['T27 统计量与 Python 一致 (真实数据)', testStatsMatchPython],
   ];
   let passed = 0, failed = 0;
   for (const [name, fn] of tests) {

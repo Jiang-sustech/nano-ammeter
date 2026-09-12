@@ -12,28 +12,46 @@
 | `console_src/` | 纯函数模块源文件（统计量、数据存档），见下 |
 | `tools/` | `nanoammeter_capture.py` 采集脚本 + `uart_flash.py` 串口烧录器 + SWD 调试 TCL 脚本 |
 
+### 分工：页面只采集与显示，分析交给 MATLAB / Origin
+
+**不在 JS 里重造数学轮子。** 相关性、最小二乘、统计量、拟合一律导出原始数据后用
+MATLAB / Origin 做 —— 那些工具本来就干这个，而且比手写实现更可信。
+
+页面的职责就三件：
+
+1. **采集** —— 发指令、收数据、校验和、断线恢复
+2. **显示** —— 波形渲染（双路叠加、坐标轴、阈值线）和数值
+3. **导出** —— 把原始码值原样存成文件，供外部工具分析
+
+因此 CSV 的设计以「MATLAB/Origin 能直接读」为第一优先：
+
+| 文件 | 内容 | 谁用 |
+|---|---|---|
+| `<stem>_wave.csv` | `index,t_us,code_int,code_ext`（双路同一索引） | MATLAB `readmatrix` / Origin 拖入 |
+| `<stem>_noise.csv` | `t_s,code` | 同上 |
+| `<stem>_meta.json` | 结果行、端口、时间、全部通信协议行（含中文） | 给人看 |
+| `<stem>.png` | 波形图 | 给人看 |
+
+**CSV 硬约束**（中文 Windows 上 MATLAB 与 Origin 对 UTF-8 处理不一致）：
+表头只用英文、数值只用十进制整数、**不得有 BOM**、无注释行、换行统一 `\n`。
+
 ### console_src/ 与「内联」约定
 
-`纳安表控制台.html` 必须保持**单文件、可双击打开**，所以下面两个模块的代码是
-**内联**进 HTML 的 `<script>` 里的：
+`纳安表控制台.html` 必须保持**单文件、可双击打开**，所以
+`console_src/archive.js`（导出与命名）的代码是**内联**进 HTML 的：
 
 | 源文件 | 内容 | 自带测试 |
 |---|---|---|
-| `console_src/stats.js` | 统计量：压轨前缀、坏读计数、差分统计、相关系数、最小二乘、上升沿 | `node console_src/stats_test.js`（45 项，与 Python 实现逐位交叉验证） |
-| `console_src/archive.js` | 数据存档：`captureStem` 命名、双路 CSV、底噪 CSV、元数据 JSON | `node console_src/archive_test.js`（18 项） |
+| `console_src/archive.js` | `captureStem` 命名、双路 CSV、底噪 CSV、元数据 JSON | `node console_src/archive_test.js`（18 项） |
 
-**改这两块逻辑请改 `console_src/` 的源文件，再把改后的内容贴回 HTML。**
-HTML 里对应的段落有醒目注释标出边界。`console_src/ref_data.json` 是 2026-09-11
-的实采数据夹具，供交叉验证使用。
-
-两个源文件末尾都有 `if (typeof module !== 'undefined' && module.exports)` 守卫 ——
+**改这块逻辑请改源文件，再把内容贴回 HTML。** HTML 里对应段落有醒目注释标边界。
+源文件末尾有 `if (typeof module !== 'undefined' && module.exports)` 守卫 ——
 Node 下可 `require`，内联进浏览器时不会因 `module` 未定义而报错。
 
-改完**两处都要跑**：
+改完跑：
 ```
-node console_src/stats_test.js      # 模块自身
-node console_src/archive_test.js
-node 纳安表控制台_自测.js            # 内联后的整体（26 项）
+node console_src/archive_test.js    # 模块自身
+node 纳安表控制台_自测.js            # 内联后的整体（25 项）
 ```
 | `中间测试/` | 历史固件归档，**只读不再开发**：见下表 |
 
