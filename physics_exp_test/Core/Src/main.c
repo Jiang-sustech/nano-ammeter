@@ -37,7 +37,7 @@
 static uint8_t has_result = 0;
 /* 1 = HSE 8MHz 晶振; 0 = MSI 内部 RC (实测 HSE 起振正常, 见 docs) */
 #ifndef CLOCK_USE_HSE
-#define CLOCK_USE_HSE 0
+#define CLOCK_USE_HSE 1
 #endif
 
 const char *clock_source_name = "?";   /* 实际用上的时钟源, READY 行报出来 */
@@ -378,12 +378,13 @@ void SystemClock_Config(void)
   }
   clock_source_name = "HSE direct (DIAG)";
 #elif CLOCK_USE_HSE
+  /* 试 PLLM=2 (VCO 输入 4MHz, 规格下限内) 而不是 M=1 —— 排除 M=1 是否被硬件拒绝 */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLM = 1;
-  RCC_OscInitStruct.PLL.PLLN = 20;
+  RCC_OscInitStruct.PLL.PLLM = 2;
+  RCC_OscInitStruct.PLL.PLLN = 40;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV7;
   RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
   RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
