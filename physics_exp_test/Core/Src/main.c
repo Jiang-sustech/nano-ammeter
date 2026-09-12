@@ -85,37 +85,65 @@ static void FormatCurrentNA(float current, char *buf)
 
 /* 结果行: 两个 ADC 的结果都报, 校准生效且非超时时再追加校准值。
  *
- *   I=<内置> X=<外部> MODE=<n> [TIMEOUT] [CAL=<校准后>]
+ *   I=<内置> X=<外部> MODE=<n> T=<ms> [TIMEOUT] [CAL=<校准后>]
+ *   MODE=1 再追加 RAW m=.. n=.. INT1=.. INT2=.. EXT1=.. EXT2=..
  *
  * I= 保持与原固件兼容 (上位机的解析正则不锚定行尾); X= 是 ADS8866 的结果,
  * 物理实验表征以它为准; CAL= 由 X= 经分段校准模型算出, 报告要的是它。
- * 超时时数值无意义, 不出 CAL=。 */
+ * 超时时数值无意义, 不出 CAL=。
+ *
+ * RAW 段是离线拟合要用的原始量: m/n = POS/NEG 周期数, INT1/INT2 与 EXT1/EXT2
+ * = 窗口首尾两个采样点的原始码 (内置那路 / ADS8866 那路)。只报电流值的话这些量
+ * 就丢了 —— 而 (m+n) 与 (m+n-1) 两种分母之争、以及分段系数 a/b 的拟合,
+ * 都得从**同一次测量**的原始量出发, 不然只能靠反推。报告的表 4-9~4-14 也用得上。
+ *
+ * 仅 MODE=1 (电荷平衡窗口) 出这一段: 小电流模式不算 m/n, 用的是起点/终点
+ * 两段平均, 原始量是另一套 (结果行的 T= 已经给了它的实际积分拍数)。 */
 static void UART_SendResultLine(float cur_int, float cur_ext, uint8_t mode,
                                 uint8_t timeout)
 {
     char vi[24], vx[24], vc[24];
-    /* 最坏情况: 三个值各占满 24 字节 -> 2+24+6+24+8+1+5+24+2 = 96,
-     * 再加结尾 NUL 就溢出了。留足余量并用 snprintf 兜底 */
-    char line[128];
+    /* 最坏情况: 三个值各占满 24 字节 -> 2+24+6+24+8+1+5+24+2 = 96;
+     * 再加 RAW 段 (最长约 60 字节) 与结尾 NUL。192 留足余量, snprintf 兜底 */
+    char line[192];
+    char raw[80] = "";
 
     FormatCurrentNA(cur_int, vi);
     FormatCurrentNA(cur_ext, vx);
+
+    if (mode == 1U)
+    {
+        uint32_t npt = Current_GetSampleCount();
+
+        if (npt > 0U)                /* 没采到样就不出, 免得报一堆 0 */
+        {
+            snprintf(raw, sizeof(raw),
+                     " RAW m=%lu n=%lu INT1=%u INT2=%u EXT1=%u EXT2=%u",
+                     (unsigned long)Current_GetMCount(),
+                     (unsigned long)Current_GetNCount(),
+                     (unsigned)Current_GetSample(0U),
+                     (unsigned)Current_GetSample(npt - 1U),
+                     (unsigned)Current_GetExtSample(0U),
+                     (unsigned)Current_GetExtSample(npt - 1U));
+        }
+    }
 
     if ((timeout == 0U) && Cal_IsValid())
     {
         FormatCurrentNA(Cal_Apply(cur_ext), vc);
         snprintf(line, sizeof(line),
-                 "I=%s nA X=%s nA MODE=%u T=%lums CAL=%s\r\n",
+                 "I=%s nA X=%s nA MODE=%u T=%lums CAL=%s%s\r\n",
                  vi, vx, mode,
-                 (unsigned long)(MeasurementState_GetTicks() * 160U / 1000U), vc);
+                 (unsigned long)(MeasurementState_GetTicks() * 160U / 1000U),
+                 vc, raw);
     }
     else
     {
         snprintf(line, sizeof(line),
-                 "I=%s nA X=%s nA MODE=%u T=%lums%s\r\n",
+                 "I=%s nA X=%s nA MODE=%u T=%lums%s%s\r\n",
                  vi, vx, mode,
                  (unsigned long)(MeasurementState_GetTicks() * 160U / 1000U),
-                 (timeout != 0U) ? " TIMEOUT" : "");
+                 (timeout != 0U) ? " TIMEOUT" : "", raw);
     }
     UART_SendString(line);
 }

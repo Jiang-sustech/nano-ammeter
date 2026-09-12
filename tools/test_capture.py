@@ -64,6 +64,13 @@ RESULT_CASES = [
     ("I=+1.234 nA MODE=2 TIMEOUT", "+1.234", None, "2", None, True),
     # D 查询回的 RESULT 前缀行 (search 不锚行首)
     ("RESULT I=+25.274 nA MODE=1", "+25.274", None, "1", None, False),
+    # 带 RAW 段 (physics_exp_test MODE=1) —— 追加字段不能破坏前面的解析
+    ("I=+40.228 nA X=+40.231 nA MODE=1 T=1000ms CAL=+40.235 "
+     "RAW m=5003 n=6251 INT1=58962 INT2=2601 EXT1=58900 EXT2=2540",
+     "+40.228", "+40.231", "1", "1000", False),
+    ("I=-40.241 nA X=-40.240 nA MODE=1 T=1000ms "
+     "RAW m=6251 n=5003 INT1=2601 INT2=58962 EXT1=2540 EXT2=58900",
+     "-40.241", "-40.240", "1", "1000", False),
 ]
 
 print("--- RESULT_RE ---")
@@ -76,6 +83,31 @@ for line, ei, ex, emode, ems, eto in RESULT_CASES:
            m.group("t"), bool(m.group("timeout")))
     check(got == (ei, ex, emode, ems, eto), line,
           "got %s want %s" % (got, (ei, ex, emode, ems, eto)))
+
+# ---------- 1b. 原始量字段 ----------
+print("\n--- raw_fields ---")
+RAW_CASES = [
+    # (行, 期望的 dict; 只列关心的项, 其余按 0 校验)
+    ("I=+40.228 nA X=+40.231 nA MODE=1 T=1000ms "
+     "RAW m=5003 n=6251 INT1=58962 INT2=2601 EXT1=58900 EXT2=2540",
+     {"raw_m": 5003, "raw_n": 6251, "raw_int1": 58962, "raw_int2": 2601,
+      "raw_ext1": 58900, "raw_ext2": 2540}),
+    # 老固件 / 小电流模式: 没有 RAW 段 -> 全 -1 (不能伪造成 0)
+    ("I=+25.274 nA MODE=1",
+     {"raw_m": -1, "raw_n": -1, "raw_int1": -1, "raw_int2": -1,
+      "raw_ext1": -1, "raw_ext2": -1}),
+    ("I=-0.012 nA X=-0.013 nA MODE=2 T=3000ms",
+     {"raw_m": -1, "raw_n": -1, "raw_int1": -1, "raw_int2": -1,
+      "raw_ext1": -1, "raw_ext2": -1}),
+]
+for line, want in RAW_CASES:
+    got = mod.raw_fields(mod.RESULT_RE.search(line))
+    check(got == want, "%-46s -> m=%s n=%s" % (line[:46], got["raw_m"], got["raw_n"]),
+          "got %s" % got)
+# 完全匹配不上时 (空行) 也要给 -1, 不能抛异常
+check(mod.raw_fields(None) == {k: -1 for k in
+      ("raw_m", "raw_n", "raw_int1", "raw_int2", "raw_ext1", "raw_ext2")},
+      "raw_fields(None) -> 全 -1")
 
 # ---------- 2. 文件名 ----------
 print("\n--- capture_name ---")

@@ -46,15 +46,23 @@ PORT = _rest[0] if _rest else "COM7"
 TRANSCRIPT = []
 
 # 两代结果行的并集。nano_ammeter:  "I=+25.274 nA MODE=1"
-#                      physics_exp_test: "I=<内置> X=<外部> MODE=1 T=1000ms [CAL=..]"
-# X= / T= 都是可选 —— 用 `nA MODE=` 直接匹配会在第二行格式上落空 (中间隔着 X=),
-# 于是 capture_name 退化成 NO_RESULT、result_na 变 NaN, 所以必须留出那一段。
+#                      physics_exp_test: "I=<内置> X=<外部> MODE=1 T=1000ms [CAL=..]
+#                                         [RAW m=.. n=.. INT1=.. INT2=.. EXT1=.. EXT2=..]"
+# X= / T= / RAW 都是可选 —— 用 `nA MODE=` 直接匹配会在第二行格式上落空 (中间隔着
+# X=), 于是 capture_name 退化成 NO_RESULT、result_na 变 NaN, 所以必须留出那一段。
+#
+# RAW 段是模式一的原始量 (POS/NEG 周期数 + 窗口首尾两路原始码), 只有
+# physics_exp_test 的 MODE=1 会出。存进 npz 是为了让 (m+n) 与 (m+n-1) 两种
+# 分母之争、以及分段系数 a/b 的拟合能直接从**同一次测量**的原始量出发。
 RESULT_RE = re.compile(
     r"I=(?P<i>[+-][0-9]+\.[0-9]+) nA"
     r"(?: X=(?P<x>[+-][0-9]+\.[0-9]+) nA)?"
     r" MODE=(?P<mode>[0-9])"
     r"(?: T=(?P<t>[0-9]+)ms)?"
-    r"(?P<timeout> TIMEOUT)?")
+    r"(?P<timeout> TIMEOUT)?"
+    r"(?: RAW m=(?P<m>[0-9]+) n=(?P<n>[0-9]+)"
+    r" INT1=(?P<int1>[0-9]+) INT2=(?P<int2>[0-9]+)"
+    r" EXT1=(?P<ext1>[0-9]+) EXT2=(?P<ext2>[0-9]+))?")
 
 
 def read_exact(ser, n, timeout):
@@ -161,6 +169,22 @@ def capture_name(result_line):
     return path
 
 
+def raw_fields(m):
+    """模式一的原始量 -> npz 字段, 缺失一律记 -1。
+
+    m/n       = POS / NEG 注入的周期数 (注意式(6)实际用的是 m 与 n-1)
+    int1/int2 = 内置 ADC 那路的窗口首尾原始码
+    ext1/ext2 = ADS8866 那路的窗口首尾原始码 (表征以它为准)
+
+    老固件没有这一段; 实验固件也只有 MODE=1 (电荷平衡窗口) 会出 —— 小电流
+    模式不算 m/n, 用的是起点/终点两段平均, 原始量是另一套。"""
+    out = {}
+    for k in ("m", "n", "int1", "int2", "ext1", "ext2"):
+        v = m.group(k) if m is not None else None
+        out["raw_" + k] = int(v) if v is not None else -1
+    return out
+
+
 def main():
     ser = serial.Serial(PORT, BAUD, timeout=0.2)
     time.sleep(0.3)
@@ -225,7 +249,14 @@ def main():
         result_timeout=(bool(m.group("timeout")) if m else False),
         timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
         port=PORT,
+        **raw_fields(m),
     )
+
+    if m is not None and m.group("m") is not None:
+        print("\n[raw] m=%s n=%s  INT %s->%s  EXT %s->%s"
+              % (m.group("m"), m.group("n"), m.group("int1"), m.group("int2"),
+                 m.group("ext1"), m.group("ext2")))
+        print("      (式(6) 用的分母是 m+n-1: 第 0 拍的计数对应窗口外的 [-1,0] 段)")
     with open(path[:-4] + ".log", "w", encoding="utf-8") as f:   # 人读的纯文本副本
         f.write("# %s  port=%s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), PORT))
         f.write("\n".join(TRANSCRIPT) + "\n")
