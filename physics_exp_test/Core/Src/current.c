@@ -213,7 +213,6 @@ void Current_Start(void)
 
     if (raw > code_zero)                    /* 典型: 压在下轨 (raw 满量程) */
     {
-        sel_state = SEL_NEG;
         ADG_Select_Negative();              /* V_o 上抬 -> raw 下降 */
         while ((raw > code_zero) && (guard != 0U))
         {
@@ -223,7 +222,6 @@ void Current_Start(void)
     }
     else
     {
-        sel_state = SEL_POS;
         ADG_Select_Positive();              /* V_o 下压 -> raw 上升 */
         while ((raw < code_zero) && (guard != 0U))
         {
@@ -239,6 +237,17 @@ void Current_Start(void)
     {
         precond_timeout++;
     }
+
+    /* ---- 开窗恒用 NEG, 与拉回方向无关 ----
+     * 式(6) 的计数修正是 `n_span = n_count - 1` —— 第 0 拍的计数对应窗口外
+     * 的 [-1, 0] 段, 所以多出来的那一拍必定是 NEG。**这条依赖"窗口恒以 NEG 开"
+     * 这个不变量**; 若让开窗极性跟着拉回方向走, 从下往上拉时多出来的就是 POS,
+     * 修正就该减 m_count —— 静默算错。
+     * 起点在 0V, 所以 NEG 这个首相位是正常长度 (到 code_lower 约 109 拍),
+     * 不会像停在阈值上那样退化成 1 拍。
+     * 切换瞬间的电荷注入被 100MΩ 隔离在积分节点之外 (开关在电阻之前), 无害。 */
+    sel_state = SEL_NEG;
+    ADG_Select_Negative();
 }
 
 /* 停止测量: 停 TIM6 + 关断 ADG (空闲状态不注入参考电流) */
