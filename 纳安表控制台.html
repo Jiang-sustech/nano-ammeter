@@ -187,7 +187,14 @@
   </div>
   <div class="sub-grid" style="margin-top:14px">
     <button id="btnQuery" disabled>🔎 查询最近结果（D）</button>
-    <button id="btnWave" disabled>📈 下载最近窗口波形（B）</button>
+    <button id="btnDiag" disabled>🩺 观测通路自检（E）</button>
+  </div>
+  <div class="sub-grid" style="margin-top:14px">
+    <button id="btnWave" disabled>📈 内置 ADC 波形（B）</button>
+    <button id="btnWaveX" disabled>📊 ADS8866 波形（X）</button>
+  </div>
+  <div class="sub-grid" style="margin-top:14px">
+    <button id="btnNoiseSeries" disabled>📉 底噪逐秒序列（W）</button>
   </div>
 </div>
 
@@ -215,7 +222,7 @@
 <div class="card">
   <h2>手动指令</h2>
   <div class="send-row">
-    <input id="cmdInput" placeholder="输入指令: S / N / D / B" maxlength="64">
+    <input id="cmdInput" placeholder="输入指令: S / N / D / B / X / W / E" maxlength="64">
     <button id="btnSend" disabled>发送</button>
   </div>
 </div>
@@ -237,9 +244,18 @@ const CODE_UPPER = Math.round(2.969 / 3.3 * 65536);
 let port = null;
 let writer = null;
 let rawBuf = [];        /* 未完成文本行的原始字节 (字节级缓存, 防 WAVE 头与二进制同包丢数据) */
-let waveMode = null;    /* 二进制接收状态: {need, bytes} */
-let waveData = null;    /* 最近一次波形 Uint16Array */
+let waveMode = null;    /* 二进制接收状态: {tag, need, bytes} */
+let waveData = null;    /* B: 最近窗口波形 (内置 ADC, Uint16Array) */
+let waveExtData = null; /* X: 同一窗口波形 (ADS8866 外部 16 位) */
+let noiseData = null;   /* W: 底噪逐秒序列 (50 点) */
 let busy = false;       /* 测量/底噪进行中 (禁用 S/N 与手动发送, 防指令被固件缓存排队) */
+
+/* 三种二进制块 (B/X/W) 共用一种格式, 只有包头字不同 (固件 UART_DumpBuffer)。
+ * 收到包头后按 tag 分流, 否则 X 的数据会覆盖 B 的、W 的会覆盖 X 的。
+ * 用函数形式暴露 (而非 let 变量), 供导出/绘图/自测读取 */
+function getWaveData()    { return waveData; }
+function getWaveExtData() { return waveExtData; }
+function getNoiseData()   { return noiseData; }
 
 const $ = id => document.getElementById(id);
 const logEl = $('log');
@@ -262,11 +278,15 @@ function escapeHtml(s) {
 /* 按钮状态 = 连接状态 ∩ busy ∩ 波形下载中 */
 function updateButtons() {
   const on = !!port;
+  const idle = !on || waveMode !== null;   /* 下载中防连点 (三种块共用一条通道) */
   $('btnStart').disabled  = !on || busy;
   $('btnNoise').disabled  = !on || busy;
   $('btnSend').disabled   = !on || busy;
-  $('btnQuery').disabled  = !on;
-  $('btnWave').disabled   = !on || waveMode !== null;
+  $('btnQuery').disabled  = !on || waveMode !== null;
+  $('btnDiag').disabled   = idle;
+  $('btnWave').disabled   = idle;
+  $('btnWaveX').disabled  = idle;
+  $('btnNoiseSeries').disabled = idle;
 }
 
 /* 测量/底噪期间禁发指令: 固件是缓存排队而非忽略, 禁用以防误操作;
@@ -345,19 +365,22 @@ function onTextLine(t) {
   if (!t) return;
   log('← ' + t, 'rx');
   setStatus(t);
-  /* B 回传头: WAVE <count> -> 进入二进制接收 */
-  const wm = t.match(/^WAVE (\d+)/);
+  /* 二进制块回传头: "<tag> <count>" -> 进入二进制接收 (B=WAVE / X=WAVEX / W=NOISE)
+   * 必须整行精确匹配 (用 $ 收尾): 底噪进度行 "NOISE 10/50s" 开头同样是
+   * "NOISE <数字>", 宽松匹配会把这行当成包头, 吞掉后面 22 字节当二进制,
+   * 导致整条数据流错位 —— 固件回传头恰好是 "<tag> <count>\r\n", 无多余内容 */
+  const wm = t.match(/^(WAVE|WAVEX|NOISE) (\d+)$/);
   if (wm) {
-    const count = parseInt(wm[1], 10);
+    const count = parseInt(wm[2], 10);
     if (count > 0) {
-      waveMode = { need: count * 2 + 2, bytes: [] };
-      updateButtons();   /* 下载中防连点 B */
-      log(`开始接收波形: ${count} 点 ...`, 'sys');
+      waveMode = { tag: wm[1], need: count * 2 + 2, bytes: [] };
+      updateButtons();   /* 下载中防连点 */
+      log(`开始接收 ${wm[1]}: ${count} 点 ...`, 'sys');
     }
   }
 }
 
-/* 二进制波形接收 + 绘图 */
+/* 二进制块接收 + 按 tag 分流存储 */
 function onWaveComplete(wm) {
   const all = wm.bytes;
   const count = (all.length - 2) / 2;
@@ -368,17 +391,32 @@ function onWaveComplete(wm) {
   for (let i = 0; i < count; i++) sum = (sum + data[i]) & 0xFFFF;
   const rxsum = all[all.length-2] | (all[all.length-1] << 8);
   const ok = sum === rxsum;
-  waveData = data;
-  log(`波形接收完成: ${count} 点, 校验和 ${ok ? 'OK ✓' : '失败 ✗ (期望 ' + rxsum.toString(16) + ' 实际 ' + sum.toString(16) + ')'}`, ok ? 'rx' : 'err');
-  drawWave();
+
+  if (!ok) {
+    /* 坏块不落地: 覆盖只会把上一份好数据也一起赔进去 */
+    log(`接收 ${wm.tag} 完成: ${count} 点, 校验和失败 ✗ (期望 ${rxsum.toString(16)} 实际 ${sum.toString(16)})`, 'err');
+    updateButtons();
+    return;
+  }
+  log(`接收 ${wm.tag} 完成: ${count} 点, 校验和 OK ✓`, 'rx');
+
+  if (wm.tag === 'WAVE')       { waveData = data; }
+  else if (wm.tag === 'WAVEX') { waveExtData = data; }
+  else                         { noiseData = data; }
+
+  drawWave(wm.tag);
   $('btnCsv').disabled = false;
   updateButtons();
-  $('waveInfo').textContent =
-    `${count} 点 × 160µs ≈ ${(count*0.16).toFixed(0)} ms · 阈值线: code_lower=${CODE_LOWER} (0.131V), code_upper=${CODE_UPPER} (2.969V)`;
+  /* 底噪是 1 点/秒, 与波形的 160µs/点不同轴 */
+  $('waveInfo').textContent = (wm.tag === 'NOISE')
+    ? `${count} 点 · 1 点/秒 (共 ${count} 秒)`
+    : `${count} 点 × 160µs ≈ ${(count*0.16).toFixed(0)} ms · 阈值线: code_lower=${CODE_LOWER} (0.131V), code_upper=${CODE_UPPER} (2.969V)`;
   $('waveInfo').style.display = 'block';
 }
 
-function drawWave() {
+/* 画最近收到的那一路 (阶段三会改成双线叠加 + 坐标轴 + PNG 导出) */
+function drawWave(tag) {
+  const arr = (tag === 'WAVEX') ? waveExtData : (tag === 'NOISE') ? noiseData : waveData;
   const cv = $('waveCanvas');
   const w = cv.clientWidth || 800, h = 220;
   cv.width = w * devicePixelRatio;
@@ -391,26 +429,29 @@ function drawWave() {
   ctx.fillStyle = '#0d1117';
   ctx.fillRect(0, 0, w, h);
 
-  const n = waveData.length;
+  const n = arr ? arr.length : 0;
   if (!n) return;
+  cv._arr = arr;                          /* 供后续导出/重绘使用 */
 
   let vmin = 65535, vmax = 0;
   for (let i = 0; i < n; i++) {
-    const v = waveData[i];
+    const v = arr[i];
     if (v < vmin) vmin = v;
     if (v > vmax) vmax = v;
   }
   const pad = (vmax - vmin) * 0.1 || 1;
   vmin -= pad; vmax += pad;
 
-  /* 阈值虚线 */
-  ctx.strokeStyle = 'rgba(210,153,34,0.6)';
-  ctx.setLineDash([5, 5]);
-  [CODE_LOWER, CODE_UPPER].forEach(th => {
-    const y = h - (th - vmin) / (vmax - vmin) * h;
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
-  });
-  ctx.setLineDash([]);
+  /* 阈值虚线 (仅波形图有意义, 底噪不画) */
+  if (tag !== 'NOISE') {
+    ctx.strokeStyle = 'rgba(210,153,34,0.6)';
+    ctx.setLineDash([5, 5]);
+    [CODE_LOWER, CODE_UPPER].forEach(th => {
+      const y = h - (th - vmin) / (vmax - vmin) * h;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    });
+    ctx.setLineDash([]);
+  }
 
   /* 波形 */
   ctx.strokeStyle = '#3fb950';
@@ -418,7 +459,7 @@ function drawWave() {
   ctx.beginPath();
   for (let i = 0; i < n; i++) {
     const x = i / (n - 1) * w;
-    const y = h - (waveData[i] - vmin) / (vmax - vmin) * h;
+    const y = h - (arr[i] - vmin) / (vmax - vmin) * h;
     if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   }
   ctx.stroke();
@@ -574,7 +615,10 @@ $('btnDisconnect').onclick = disconnect;
 $('btnStart').onclick = () => send('S');
 $('btnNoise').onclick = () => send('N');
 $('btnQuery').onclick = () => send('D');
+$('btnDiag').onclick = () => send('E');
 $('btnWave').onclick = () => { $('btnCsv').disabled = true; send('B'); };
+$('btnWaveX').onclick = () => send('X');
+$('btnNoiseSeries').onclick = () => send('W');
 $('btnCsv').onclick = () => {
   if (!waveData) return;
   let csv = 'index,code\n';
@@ -607,6 +651,10 @@ document.addEventListener('keydown', e => {
 });
 
 log('控制台就绪。连接串口后即可控制仪器。', 'sys');
+
+/* 初始按钮状态在代码里落实一次, 不依赖 HTML 的 disabled 属性 ——
+ * 否则以后新增按钮漏写属性, 未连接时就是可点的 */
+updateButtons();
 
 /* 自检横幅: 浏览器/上下文是否支持 Web Serial */
 (function diag() {
