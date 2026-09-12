@@ -774,6 +774,157 @@ async function testSeqBlocksButtonsAndAborts() {
   assert.strictEqual(els['btnSeq'].disabled, true, '断线后按钮应保持禁用');
 }
 
+/* ---- 实验表征面板 ---- */
+
+/* 构造一个采集点: 三路读数各三组 (内置 / 外部) */
+function mkPoint(std, unit, ints, exts) {
+  return {
+    std, unit,
+    reads: ints.map((v, i) => (v === null ? null
+      : { int_na: v, ext_na: exts[i], mode: 1 })),
+  };
+}
+
+/* T32: 统计依据可切换 —— 外部 (默认) 与内置各算一套, 另一路只报均值 */
+function testExpRowsDualPath() {
+  setup();
+  const pts = [mkPoint(10, 'nA', [10.10, 10.20, 10.30], [10.00, 10.01, 10.02])];
+
+  const ext = expRows(pts, 'ext')[0];
+  assert.strictEqual(ext.cells[2], '10.000', '外部第1读数');
+  assert.strictEqual(ext.cells[4], '10.020', '外部第3读数');
+  assert.strictEqual(ext.cells[5], '10.010', '外部均值');
+  assert.strictEqual(ext.cells[6], '0.010', '外部实验标准差 s');
+  assert.strictEqual(ext.cells[9], '10.200', '另一路应报内置均值');
+
+  const int_ = expRows(pts, 'int')[0];
+  assert.strictEqual(int_.cells[2], '10.100', '内置第1读数');
+  assert.strictEqual(int_.cells[5], '10.200', '内置均值');
+  assert.strictEqual(int_.cells[9], '10.010', '另一路应报外部均值');
+
+  /* δ% = (均值 - 标准值)/标准值 × 100, 以外部为准 */
+  assert.strictEqual(ext.cells[8], '0.10', '外部相对误差应为 +0.10%');
+  assert.strictEqual(int_.cells[8], '2.00', '内置相对误差应为 +2.00%');
+}
+
+/* T33: 超时点不得污染统计 —— 该格标红, 且均值只由有效读数算出 */
+function testExpRowsTimeout() {
+  setup();
+  const pts = [mkPoint(5, 'nA', [5.01, null, 5.03], [5.00, null, 5.02])];
+  const r = expRows(pts, 'ext')[0];
+  assert.strictEqual(r.cells[3], '超时', '超时格应显示"超时"');
+  assert.ok(r.bad[3] === true, '超时格应被标红');
+  assert.strictEqual(r.cells[5], '5.010', '均值应只由两个有效读数算出');
+  assert.strictEqual(r.cells[6], '0.014', 's 应只由两个有效读数算出');
+  assert.strictEqual(r.cells[7], '0.010', 'Δ 应为 均值-标准值');
+}
+
+/* T34: 老固件 (无 X= 字段) 时外部分支记 null, 不得伪造数值 */
+function testExpRowsNoExternal() {
+  setup();
+  const pts = [{
+    std: 5, unit: 'nA',
+    reads: [0, 1, 2].map(() => ({ int_na: 5.01, ext_na: null, mode: 1 })),
+  }];
+  const r = expRows(pts, 'ext')[0];
+  assert.strictEqual(r.cells[2], '—', '该路无数据应显示 —');
+  assert.strictEqual(r.cells[5], '—', '均值为 —');
+  assert.strictEqual(r.cells[9], '5.010', '内置均值仍应给出');
+  assert.ok(r.bad.every(b => b === false),
+    '★ 该路无数据不等于测量超时, 不得标红 —— 否则会把"固件没报这一路"误报成故障');
+
+  /* 真正的超时必须显示"超时"并标红, 与上面区分开 */
+  const pts2 = [{ std: 5, unit: 'nA', reads: [null, null, null] }];
+  const r2 = expRows(pts2, 'ext')[0];
+  assert.strictEqual(r2.cells[2], '超时', '超时应显示"超时"');
+  assert.ok(r2.bad[2] === true, '超时格应标红');
+}
+
+/* T35: CSV —— 两路都导出、纯 ASCII、超时留空 (不写 0) */
+function testExpCsv() {
+  setup();
+  const pts = [mkPoint(10, 'nA', [10.10, null, 10.30], [10.00, 10.01, 10.02])];
+  const csv = expCsv(pts);
+  const lines = csv.split('\n');
+  assert.strictEqual(lines[0],
+    'index,i_std,unit,int1,int2,int3,ext1,ext2,ext3,mean_ext,s_ext,delta(ext),delta_pct(ext),mean_int');
+  const f = lines[1].split(',');
+  assert.strictEqual(f.length, 14, '数据列数');
+  assert.strictEqual(f[3], '10.100', '内置读数应导出');
+  assert.strictEqual(f[4], '', '超时的那次应留空, 不得写 0');
+  assert.strictEqual(f[6], '10.000', '外部读数应导出');
+  assert.strictEqual(f[9], '10.010', 'mean_ext 应只用有效外部读数');
+  assert.strictEqual(f[13], '10.200', 'mean_int 应同时导出');
+  assert.ok(/^[\x00-\x7F]*$/.test(csv), 'CSV 必须是纯 ASCII');
+  assert.ok(csv.charCodeAt(0) !== 0xFEFF, 'CSV 不得有 BOM');
+}
+
+/* T36: 系数行解析 —— CAL NONE / 三段系数 / 非系数行 */
+function testCalParse() {
+  setup();
+  assert.deepStrictEqual(calParse('CAL NONE'), [], 'CAL NONE 应为空数组');
+  const c = calParse('CAL 3 998765,-123 1000234,56 999123,-12');
+  assert.strictEqual(c.length, 3, '应解析出三段');
+  assert.strictEqual(c[0].a, 0.998765, 'a 应为 ppm/1e6');
+  assert.strictEqual(c[0].b, -123e-15, 'b 应为 fA/1e15');
+  assert.strictEqual(c[1].a, 1.000234);
+  assert.strictEqual(c[2].b, -12e-15);
+  /* 非系数行必须返回 null, 否则会把普通文本当系数 */
+  assert.strictEqual(calParse('I=+25.274 nA MODE=1'), null);
+  assert.strictEqual(calParse('CAL 2 1,2 3,4'), null, '段数不是 3 应返回 null');
+}
+
+/* T37: a/b 换算 —— a 无量纲 -> ppm, b 以 pA 输入 -> fA */
+function testCalConvert() {
+  setup();
+  const c = calConvert(0.998765, -0.123);
+  assert.strictEqual(c.ppm, 998765, 'a × 1e6');
+  assert.strictEqual(c.fA, -123, 'b(pA) × 1000');
+  const d = calConvert(1, 0);
+  assert.strictEqual(d.ppm, 1000000);
+  assert.strictEqual(d.fA, 0);
+}
+
+/* T38: 逐点采集完整流程 —— 填标准值 → 采集 3 次 → 记账 → 表格/CSV 可用 */
+async function testExpAcquireFlow() {
+  setup();
+  currentPort = makeFakePort('P1');
+  await connect();
+  const push = s => currentPort._push(new TextEncoder().encode(s));
+
+  document.getElementById('expStd').value = '10';
+  document.getElementById('expUnit').value = 'nA';
+  els['btnExpTake3'].click();
+  await tick(20);
+  assert.ok(currentPort._writes.some(w => w.trim() === 'S'), '应发出 S');
+
+  push('START MODE1\r\nI=+10.100 nA X=+10.000 nA MODE=1\r\n');
+  await tick(20);
+  assert.strictEqual(currentPort._writes.filter(w => w.trim() === 'S').length, 2,
+    '第 1 次完成应自动发第 2 次 S');
+  push('START MODE1\r\nI=+10.200 nA X=+10.010 nA MODE=1\r\n');
+  await tick(20);
+  push('START MODE1\r\nI=+10.300 nA X=+10.020 nA MODE=1\r\n');
+  await tick(20);
+
+  assert.strictEqual(getExpPoints().length, 1, '应记录 1 个点');
+  assert.strictEqual(getExpPoints()[0].reads.length, 3, '应记录 3 次读数');
+  assert.strictEqual(getExpPoints()[0].reads[0].ext_na, 10.000, '外部读数应被解析');
+  assert.strictEqual(getExpPoints()[0].reads[0].int_na, 10.100, '内置读数应被解析');
+  assert.strictEqual(els['btnExpCsv'].disabled, false, '有数据后 CSV 应可用');
+
+  /* 采集期间防连点: 一轮没走完时再点不得另起一轮 */
+  document.getElementById('expStd').value = '20';
+  els['btnExpTake'].click();
+  await tick(20);
+  const nS = () => currentPort._writes.filter(w => w.trim() === 'S').length;
+  const n = nS();                       /* 新起一轮, 刚发出第 1 个 S */
+  assert.strictEqual(els['btnExpTake'].disabled, true, '采集中应禁用采集按钮');
+  els['btnExpTake'].click();            /* 连点: disabled 按钮 click 无效 */
+  await tick(20);
+  assert.strictEqual(nS(), n, '★ 采集中连点不得再发出 S');
+}
+
 /* ---------------- 运行 ---------------- */
 (async function main() {
   console.log('纳安表控制台自测');
@@ -808,6 +959,13 @@ async function testSeqBlocksButtonsAndAborts() {
     ['T29 波形失败只重发B不重发S', testSeqRetriesWaveNotMeasurement],
     ['T30 BUSY 重新计时不中止', testSeqBusyKeepsWaiting],
     ['T31 序列中禁按钮/拔线中止', testSeqBlocksButtonsAndAborts],
+    ['T32 双路统计可切换 (外/内)', testExpRowsDualPath],
+    ['T33 超时不污染统计', testExpRowsTimeout],
+    ['T34 无外部读数不伪造数值', testExpRowsNoExternal],
+    ['T35 采集 CSV 双路导出', testExpCsv],
+    ['T36 系数行解析', testCalParse],
+    ['T37 a/b 换算 ppm/fA', testCalConvert],
+    ['T38 逐点采集流程', testExpAcquireFlow],
   ];
   let passed = 0, failed = 0;
   for (const [name, fn] of tests) {

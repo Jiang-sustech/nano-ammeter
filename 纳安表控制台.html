@@ -133,6 +133,25 @@
   .png-btn { font-size: 0.85rem; padding: 6px 12px; margin-left: 6px; }
   #waveInfo { color: var(--dim); font-size: 0.8rem; margin-top: 8px; display: none; }
 
+  /* 实验表征面板 */
+  .exp-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .exp-row label { color: var(--dim); font-size: 0.85rem; }
+  .exp-row input, .exp-row select {
+    background: #0d1117; border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); font-family: Consolas, monospace; font-size: 0.9rem;
+    padding: 7px 10px;
+  }
+  .exp-row input:focus, .exp-row select:focus { outline: none; border-color: var(--accent); }
+  #expTable { width: 100%; border-collapse: collapse; font-size: 0.8rem;
+              font-family: Consolas, monospace; }
+  #expTable th, #expTable td { border-bottom: 1px solid var(--border);
+                               padding: 5px 6px; text-align: right; }
+  #expTable th { color: var(--dim); font-weight: 500; text-align: right; }
+  #expTable th:first-child, #expTable td:first-child { text-align: left; }
+  #expTable td.bad { color: var(--red); }
+  #expEmpty { color: var(--dim); font-size: 0.85rem; padding: 8px 0; }
+  #calStatus { font-family: Consolas, monospace; font-size: 0.8rem; color: var(--dim); }
+
   .send-row { display: flex; gap: 10px; }
   .send-row input {
     flex: 1;
@@ -212,6 +231,70 @@
   <div id="waveInfo"></div>
 </div>
 
+<!-- 实验表征 (只对 physics_exp_test 固件有效) -->
+<div class="card">
+  <h2>实验表征 <button id="btnExpToggle" class="png-btn" style="float:right">展开</button></h2>
+  <div id="expBody" style="display:none">
+
+    <div style="color:var(--dim);font-size:0.8rem;margin-bottom:14px;">
+      逐点采集：填 2636B 标准值 → 采集 → 自动配对记录 → 导出。
+      只对 <b>physics_exp_test</b> 固件有效；对着 nano_ammeter 用只会收到相同读数。
+    </div>
+
+    <div class="exp-row">
+      <label>标准值 I<sub>std</sub></label>
+      <input id="expStd" type="number" step="any" placeholder="例如 10.00" style="width:120px">
+      <select id="expUnit">
+        <option value="nA">nA</option>
+        <option value="pA">pA</option>
+      </select>
+      <button id="btnExpTake" disabled>采集 1 次（S）</button>
+      <button id="btnExpTake3" disabled>采集 3 次</button>
+      <label>统计依据</label>
+      <select id="expPath">
+        <option value="ext">ADS8866（推荐）</option>
+        <option value="int">内置 ADC（对照）</option>
+      </select>
+      <span class="spacer"></span>
+      <button id="btnExpCsv" disabled>导出 CSV</button>
+      <button id="btnExpClear" disabled>清空</button>
+    </div>
+
+    <div id="expEmpty">尚无数据。每个校准点建议重复测量 3 次。</div>
+    <table id="expTable" style="display:none">
+      <thead><tr>
+        <th>#</th><th>I<sub>std</sub></th><th>读数1</th><th>读数2</th><th>读数3</th>
+        <th>平均</th><th>s</th><th>Δ</th><th>δ/%</th><th>另一路均值</th>
+      </tr></thead>
+      <tbody id="expTbody"></tbody>
+    </table>
+
+    <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+
+    <div class="exp-row">
+      <label>校准系数</label>
+      <button id="btnCalQuery" disabled>查询（C）</button>
+      <span id="calStatus">未知（未查询）</span>
+    </div>
+    <div class="exp-row">
+      <label>段</label>
+      <select id="calSeg" style="width:150px">
+        <option value="0">0 负向 nA</option>
+        <option value="1">1 正向 nA</option>
+        <option value="2">2 小电流</option>
+      </select>
+      <label>a</label>
+      <input id="calA" type="number" step="any" placeholder="1.000000" style="width:130px">
+      <label>b (pA)</label>
+      <input id="calB" type="number" step="any" placeholder="0.0" style="width:110px">
+      <button id="btnCalWrite" disabled>写入（K）</button>
+      <button id="btnCalClear" disabled>清除（Z）</button>
+      <span id="calPreview" style="font-family:Consolas,monospace;font-size:0.78rem;color:var(--dim)"></span>
+    </div>
+
+  </div>
+</div>
+
 <!-- 日志 -->
 <div class="card">
   <h2>通信日志</h2>
@@ -288,6 +371,14 @@ function updateButtons() {
   $('btnStart').disabled  = !on || busy || sq;
   $('btnSend').disabled   = !on || busy;
   $('btnQuery').disabled  = !on || waveMode !== null;
+  /* 实验表征面板: 采集期间禁连点, 序列进行中禁发指令 */
+  const acq = expAcq !== null;
+  $('btnExpTake').disabled     = !on || busy || acq || sq;
+  $('btnExpTake3').disabled    = !on || busy || acq || sq;
+  $('btnExpClear').disabled    = !on && expPoints.length === 0;
+  $('btnCalQuery').disabled    = !on || sq || acq;
+  $('btnCalWrite').disabled    = !on || sq || acq;
+  $('btnCalClear').disabled    = !on || sq || acq;
   $('btnDiag').disabled   = idle || sq;
   $('btnWave').disabled   = idle || sq;
   $('btnWaveX').disabled  = idle || sq;
@@ -368,6 +459,7 @@ function onTextLine(t) {
   logLines.push(t);                  /* 留档: 导出的 meta.json 里带上全部协议行 */
   log('← ' + t, 'rx');
   setStatus(t);
+  expOnLine(t);
   seqOnLine(t);
   /* 二进制块回传头: "<tag> <count>" -> 进入二进制接收 (B=WAVE / X=WAVEX)
    * 必须整行精确匹配 (用 $ 收尾): 固件还有别的行以同样字头开头, 宽松匹配会把
@@ -695,6 +787,222 @@ function download(text, name, mime) {
 }
 
 /* ============================================================
+ * 实验表征面板: 逐点采集 + 校准系数收发
+ * 只对 physics_exp_test 固件有效; 协议见 physics_exp_test/README.md
+ *
+ * 表格与 CSV 的计算抽成纯函数 (expRows / expCsv / calParse),
+ * 自测可直接喂数据断言, 不必经过 DOM。
+ * ============================================================ */
+const UNIT_NA = { nA: 1, pA: 1e-3 };     /* 1 单位 = 多少 nA */
+const CAL_RE = /^CAL 3 (\S+) (\S+) (\S+)$/;
+
+let expShown = false;      /* 面板是否展开 */
+let expAcq = null;         /* 正在采集: {std, unit, need, reads[]} */
+let expPoints = [];        /* 已采集的点 */
+let calCoef = null;        /* 从固件读回的系数 [{a,b}×3]; null = 未校准/未查询 */
+
+/* 采集结果 -> 表格行 (纯函数)。
+ * path: 'ext' = 用 ADS8866 读数做统计 (默认, 也是最终结果的标准)
+ *       'int' = 用内置 ADC 读数做统计 (仅对照; 1 pA 量程下量化误差约 25%)
+ * 三点读数、均值、s、Δ、δ% 都跟着 path 走; 另一路只报均值供对照。 */
+function expRows(points, path) {
+  const P = (path === 'int') ? 'int' : 'ext';
+  const Q = (P === 'ext') ? 'int' : 'ext';
+  return points.map((p, i) => {
+    const k = UNIT_NA[p.unit] || 1;            /* 1 单位 = k nA */
+    const f = 1 / k;                           /* nA -> 显示单位 */
+    const dp = (p.unit === 'pA') ? 2 : 3;
+    const get = (r, w) => (r ? r[w + '_na'] : null);
+    const vals = p.reads.map(r => get(r, P));
+    const other = p.reads.map(r => get(r, Q)).filter(v => v !== null);
+    const good = vals.filter(v => v !== null);
+    const mean = good.length ? good.reduce((a, b) => a + b, 0) / good.length : null;
+    const sd = (good.length > 1)
+      ? Math.sqrt(good.reduce((a, b) => a + (b - mean) * (b - mean), 0) / (good.length - 1))
+      : null;
+    const stdNa = (p.std === null) ? null : p.std * k;
+    const delta = (mean !== null && stdNa !== null) ? mean - stdNa : null;
+    const rel = (delta !== null && stdNa !== 0) ? delta / stdNa * 100 : null;
+    const num = v => (v === null ? '—' : (v * f).toFixed(dp));
+    const otherMean = other.length ? other.reduce((a, b) => a + b, 0) / other.length : null;
+    /* 两种"没有值"必须分开显示, 否则会把"这一路没数据"误报成"测量超时":
+     *   reads[j] === null      -> 这一次测量本身超时 (标红)
+     *   reads[j] 有但该路为 null -> 该路没有数据 (比如老固件不报 X=), 显示 — */
+    const cellOf = (j) => {
+      if (p.reads[j] === null) return '超时';
+      return vals[j] === null ? '—' : (vals[j] * f).toFixed(dp);
+    };
+    const bad = vals.map((v, j) => p.reads[j] === null);
+    return {
+      cells: [
+        String(i + 1),
+        p.std === null ? '—' : p.std.toFixed(dp),
+        ...vals.map((v, j) => cellOf(j)),
+        num(mean),
+        num(sd),
+        num(delta),
+        rel === null ? '—' : rel.toFixed(2),
+        num(otherMean),
+      ],
+      /* 与 cells 等长 */
+      bad: [false, false, ...bad, false, false, false, false, false],
+      unit: p.unit,
+    };
+  });
+}
+
+/* 采集结果 -> CSV (纯函数, 只含 ASCII, 无 BOM)。
+ * **两路都导出** —— 报告要写内置/外部一致性, 而且用户要求先用内置跑一遍
+ * 与外部对照。数值按该点选定的单位输出, 另给单位列。
+ * 超时点该格留空 (不写 0, 免得被 MATLAB 当成真实读数参与拟合)。 */
+function expCsv(points) {
+  let out = 'index,i_std,unit,int1,int2,int3,ext1,ext2,ext3,' +
+            'mean_ext,s_ext,delta(ext),delta_pct(ext),mean_int\n';
+  points.forEach((p, i) => {
+    const k = UNIT_NA[p.unit] || 1;
+    const f = 1 / k;
+    const dp = (p.unit === 'pA') ? 2 : 3;
+    const cell = v => (v === null ? '' : (v * f).toFixed(dp));
+    const pick = w => p.reads.map(r => (r ? r[w + '_na'] : null));
+    const ext = pick('ext'), int_ = pick('int');
+    const ex = ext.filter(v => v !== null);
+    const im = int_.filter(v => v !== null);
+    const mean = ex.length ? ex.reduce((a, b) => a + b, 0) / ex.length : null;
+    const sd = (ex.length > 1)
+      ? Math.sqrt(ex.reduce((a, b) => a + (b - mean) * (b - mean), 0) / (ex.length - 1))
+      : null;
+    const stdNa = (p.std === null) ? null : p.std * k;
+    const delta = (mean !== null && stdNa !== null) ? mean - stdNa : null;
+    const rel = (delta !== null && stdNa !== 0) ? delta / stdNa * 100 : null;
+    const imean = im.length ? im.reduce((a, b) => a + b, 0) / im.length : null;
+    out += [
+      i + 1,
+      p.std === null ? '' : p.std.toFixed(dp),
+      p.unit,
+      ...int_.map(cell),
+      ...ext.map(cell),
+      cell(mean), cell(sd),
+      delta === null ? '' : (delta * f).toFixed(dp),
+      rel === null ? '' : rel.toFixed(2),
+      cell(imean),
+    ].join(',') + '\n';
+  });
+  return out;
+}
+
+/* 固件系数响应 -> 数组 (纯函数)。返回 null 表示不是系数行。 */
+function calParse(t) {
+  if (t === 'CAL NONE') return [];
+  const m = t.match(CAL_RE);
+  if (!m) return null;
+  return m.slice(1).map(s => {
+    const p = s.split(',');
+    return { a: parseInt(p[0], 10) / 1e6, b: parseInt(p[1], 10) / 1e15 };
+  });
+}
+
+function expPath() { return $('expPath').value === 'int' ? 'int' : 'ext'; }
+/* 供自测读取内部状态 (let 声明对 Node 模块不可见, 只能走函数) */
+function getExpPoints() { return expPoints; }
+function getCalCoef() { return calCoef; }
+
+function expToggle() {
+  expShown = !expShown;
+  $('expBody').style.display = expShown ? 'block' : 'none';
+  $('btnExpToggle').textContent = expShown ? '收起' : '展开';
+  if (expShown && port) send('C');        /* 展开时顺手查一次系数 */
+}
+
+function expTake(n) {
+  if (!port) { log('未连接', 'err'); return; }
+  if (expAcq) { log('上一次采集尚未结束', 'err'); return; }
+  if (busy || seqRunning()) { log('板子忙，稍后再采', 'err'); return; }
+  const raw = parseFloat($('expStd').value);
+  expAcq = { std: isNaN(raw) ? null : raw, unit: $('expUnit').value, need: n, reads: [] };
+  expSendNext();
+}
+
+function expSendNext() {
+  log(`    采集 ${expAcq.reads.length + 1}/${expAcq.need} …`, 'sys');
+  send('S');
+}
+
+function expCommit() {
+  expPoints.push(expAcq);
+  log('    → ' + expAcq.reads.map(r => (r ? r.na + ' nA' : '超时')).join(' / '), 'rx');
+  expAcq = null;
+  expRender();
+}
+
+/* 文本行入口: 采集记账 + 系数响应 */
+function expOnLine(t) {
+  const coef = calParse(t);
+  if (coef !== null) {
+    calCoef = coef.length ? coef : null;
+    calRender();
+    return;
+  }
+  if (t.indexOf('CAL SET') === 0) { log('    系数已写入，正在回读确认 …', 'sys'); send('C'); return; }
+  if (t.indexOf('CAL CLEAR') === 0) { log('    固件已清除校准', 'sys'); send('C'); return; }
+  if (t.indexOf('CAL ERR') === 0) { log('    ' + t, 'err'); return; }
+
+  if (!expAcq) return;
+  if (t.indexOf('I=') !== 0) return;
+  /* 结果行两个 ADC 都报: I=<内置> X=<外部> MODE=<n> [CAL=<校准后>]
+   * 老固件没有 X= 字段, 此时 ext_na 记 null, 表格对应格显示"—"而不伪造 */
+  const m = t.match(/^I=([+-][0-9]+\.[0-9]+) nA(?: X=([+-][0-9]+\.[0-9]+) nA)? MODE=(\d)( TIMEOUT)?/);
+  if (!m) return;
+  expAcq.reads.push(m[4] ? null : {
+    int_na: parseFloat(m[1]),
+    ext_na: m[2] ? parseFloat(m[2]) : null,
+    mode: parseInt(m[3], 10),
+  });
+  if (expAcq.reads.length >= expAcq.need) expCommit();
+  else expSendNext();
+}
+
+function expRender() {
+  const has = expPoints.length > 0;
+  $('expEmpty').style.display = has ? 'none' : 'block';
+  $('expTable').style.display = has ? 'table' : 'none';
+  $('btnExpCsv').disabled = !has;
+  $('btnExpClear').disabled = !has;
+  $('expTbody').innerHTML = expRows(expPoints, expPath()).map(r =>
+    '<tr>' + r.cells.map((c, i) =>
+      '<td' + (r.bad[i] ? ' class="bad"' : '') + '>' + escapeHtml(c) + '</td>'
+    ).join('') + '</tr>').join('');
+}
+
+function calRender() {
+  if (calCoef === null) {
+    $('calStatus').textContent = port ? '未校准（a=1, b=0）' : '未连接';
+    return;
+  }
+  const name = ['负nA', '正nA', '小电流'];
+  $('calStatus').textContent = calCoef.map((c, i) =>
+    `${name[i]}: a=${c.a.toFixed(6)} b=${(c.b * 1e12).toFixed(3)}pA`).join('  |  ');
+}
+
+/* a 无量纲、b 以 pA 输入 —— UI 换算成 ppm / fA 两个整数再发 */
+function calConvert(a, bPA) {
+  return { ppm: Math.round(a * 1e6), fA: Math.round(bPA * 1000) };
+}
+
+function calPreview() {
+  const a = parseFloat($('calA').value), b = parseFloat($('calB').value);
+  $('calPreview').textContent = (isFinite(a) && isFinite(b))
+    ? `→ K${$('calSeg').value},${calConvert(a, b).ppm},${calConvert(a, b).fA}`
+    : '';
+}
+
+function calWrite() {
+  const a = parseFloat($('calA').value), bPA = parseFloat($('calB').value);
+  if (!isFinite(a) || !isFinite(bPA)) { log('a 或 b 没填完整', 'err'); return; }
+  const c = calConvert(a, bPA);
+  send(`K${$('calSeg').value},${c.ppm},${c.fA}`);
+}
+
+/* ============================================================
  * 一键全流程: E -> S -> B -> X -> E
  *
  * 每步独立超时; 失败只**重发当前那条指令**, 不从头再来 ——
@@ -965,6 +1273,20 @@ $('btnStart').onclick = () => send('S');
 $('btnQuery').onclick = () => send('D');
 $('btnDiag').onclick = () => send('E');
 $('btnSeq').onclick = seqStart;
+$('btnExpToggle').onclick = expToggle;
+$('btnExpTake').onclick = () => expTake(1);
+$('btnExpTake3').onclick = () => expTake(3);
+$('btnExpClear').onclick = () => { expPoints = []; expRender(); };
+$('btnExpCsv').onclick = () => {
+  if (expPoints.length) download(expCsv(expPoints), 'exp_points.csv', 'text/csv');
+};
+$('expPath').onchange = expRender;
+$('btnCalQuery').onclick = () => send('C');
+$('btnCalWrite').onclick = calWrite;
+$('btnCalClear').onclick = () => send('Z');
+$('calA').oninput = calPreview;
+$('calB').oninput = calPreview;
+$('calSeg').onchange = calPreview;
 $('btnWave').onclick = () => { $('btnCsv').disabled = true; send('B'); };
 $('btnWaveX').onclick = () => send('X');
 $('btnPng').onclick = exportPng;
@@ -1014,6 +1336,8 @@ log('控制台就绪。连接串口后即可控制仪器。', 'sys');
 /* 初始按钮状态在代码里落实一次, 不依赖 HTML 的 disabled 属性 ——
  * 否则以后新增按钮漏写属性, 未连接时就是可点的 */
 updateButtons();
+expRender();
+calRender();
 
 /* 自检横幅: 浏览器/上下文是否支持 Web Serial */
 (function diag() {
