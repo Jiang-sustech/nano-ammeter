@@ -95,6 +95,7 @@ static float t1_s, t2_s;
 #define TICKS_PER_SECOND 6250U       /* TIM6 160us -> 1s */
 static void Noise_Tick(void);
 static float HardIntegral_CycleCurrent(void);   /* 单循环双斜率结果 (前向声明) */
+static void SmallI_Tick(uint16_t raw, uint16_t raw_ext);
 static volatile uint8_t noise_active;
 static volatile uint8_t noise_done;
 static uint32_t noise_ticks;
@@ -103,6 +104,26 @@ static float noise_bias_current;
 static uint8_t noise_saturated;      /* 采到的点压轨 (结果不可信) */
 static uint16_t noise_min_code;      /* 50 个点的码值范围 (诊断用) */
 static uint16_t noise_max_code;
+
+/* ---- 小电流模式 (纯积分 + 斜率) 的参数与状态 ---- */
+#define SI_TICKS_PER_SEC   6250U        /* TIM6 160us -> 1s */
+#define SI_DEFAULT_SEC     3U
+#define SI_MAX_SEC         30U
+#define SI_RAIL_V          3.5f         /* |dV| 到这儿就提前收尾 (轨在 4.3V) */
+#define SI_SETTLE_TICKS    8U           /* 断开参考后注入台阶的稳定拍数 */
+#define SI_AVG_TICKS       8U           /* 起点/终点各取多少拍平均 */
+
+static volatile uint8_t  si_active;
+static volatile uint8_t  si_done;
+static volatile uint8_t  si_short;      /* 撞轨提前收尾 (结果仍有效, 但积分时间短了) */
+static volatile uint32_t si_ticks;
+static uint32_t          si_target_ticks = SI_DEFAULT_SEC * SI_TICKS_PER_SEC;
+static uint32_t          si_decim;      /* 抽点存波形的间隔 */
+static float             si_start_int, si_start_ext;    /* 起点 (积分器域 V) */
+static float             si_cur_int,  si_cur_ext;       /* 结果 (A) */
+static uint16_t          si_ring_int[SI_AVG_TICKS];
+static uint16_t          si_ring_ext[SI_AVG_TICKS];
+static uint8_t           si_ring_n, si_ring_i;
 
 /* ---- ADC 域阈值 (原始码) ---- */
 static uint16_t code_upper, code_lower, code_zero, code_target;
@@ -192,6 +213,8 @@ void Current_Start(void)
     hard_phase = HARD_IDLE;
     noise_active = 0U;
     noise_done = 0U;
+    si_active = 0U;
+    si_done = 0U;
 
     ThresholdCodes_Init();
 
@@ -267,6 +290,12 @@ void Current_Process(void)
     }
 
     raw = ReadBoth(&raw_ext);       /* 内置(控制) + 外部(观测) 同拍 */
+
+    if (si_active)
+    {
+        SmallI_Tick(raw, raw_ext);
+        return;
+    }
 
     if (hard_phase == HARD_IDLE)
     {
@@ -638,6 +667,168 @@ float Current_GetNoiseVoltage(void)
     sigma_v = sigma_code * ((double)ADS8866_VREF / 65536.0) / (double)LEVELSHIFT_GAIN;
     return (float)sigma_v;
 }
+
+/* ============================================================
+ * 小电流模式 (1 pA ~ 1 nA): 纯积分 + 斜率
+ *
+ * 为什么不用模式二的双斜率: 1 pA 时上积相要 t1 = C*dV/I = 200 秒才积得
+ * 起 2V, 10 秒预算连一个循环都跑不完 —— 模式二的下限约 6 pA 就是这么来的。
+ * 而小电流根本不需要参考电流把它拉回来: 1 pA 积 3 秒才 30mV, 离 ±4.3V
+ * 的轨远得很, 直接积、测首尾两点即可。
+ *
+ *   I = C * (V_start - V_end) / T
+ *
+ * 符号与模式一同一约定 (与 I_POS 同号为正): I_POS 使 V_int 下降、原始码
+ * 上升, 所以正电流 -> 码上升 -> V_start > V_end -> I > 0。
+ *
+ * 积分时间默认 3 秒: 上限由 90 pA 卡出来 (90pA*3s/100pF = 2.7V, 不撞轨),
+ * 下限由 1 pA 的分辨率卡出来 (1pA*3s/100pF = 30mV = ADS8866 的 196 码)。
+ * 积分中 |dV| 超过 3.5V 就提前收尾并按**实际**时间计算, 免得大电流直接撞轨。
+ * ============================================================ */
+void SmallI_SetSeconds(uint8_t sec)
+{
+    if (sec < 1U) { sec = 1U; }
+    if (sec > SI_MAX_SEC) { sec = SI_MAX_SEC; }
+    si_target_ticks = (uint32_t)sec * SI_TICKS_PER_SEC;
+}
+
+uint8_t SmallI_GetSeconds(void)
+{
+    return (uint8_t)(si_target_ticks / SI_TICKS_PER_SEC);
+}
+
+/* 收尾: 由末尾若干拍平均出终点, 再用实际积分时间算电流 */
+static void SmallI_Finish(void)
+{
+    float sum_i = 0.0f, sum_e = 0.0f, t_s;
+    uint8_t k;
+
+    for (k = 0U; k < si_ring_n; k++)
+    {
+        sum_i += CodeToVInt(si_ring_int[k]);
+        sum_e += CodeToVInt(si_ring_ext[k]);
+    }
+    if (si_ring_n > 0U)
+    {
+        sum_i /= (float)si_ring_n;
+        sum_e /= (float)si_ring_n;
+    }
+
+    t_s = (float)si_ticks * T_INT;
+    if (t_s > 0.0f)
+    {
+        si_cur_int = C_INT * (si_start_int - sum_i) / t_s;
+        si_cur_ext = C_INT * (si_start_ext - sum_e) / t_s;
+    }
+
+    window_current     = si_cur_int;
+    window_current_ext = si_cur_ext;
+    last_window_count  = sample_index;      /* B/X 回传用: 抽点后的点数 */
+    last_m = si_ticks;                      /* 借用: 实际积分拍数 (标定/诊断) */
+    last_n = 0U;
+
+    si_active = 0U;
+    si_done   = 1U;
+    HAL_TIM_Base_Stop_IT(&htim6);
+    ADG_Disable();
+}
+
+/* 每 tick 调用 (由 Current_Process 转发, 已带两路采样) */
+static void SmallI_Tick(uint16_t raw, uint16_t raw_ext)
+{
+    float d;
+
+    /* 末尾平均用的环形 (终点用最后几拍, 单点噪声太大) */
+    si_ring_int[si_ring_i] = raw;
+    si_ring_ext[si_ring_i] = raw_ext;
+    si_ring_i = (uint8_t)((si_ring_i + 1U) % SI_AVG_TICKS);
+    if (si_ring_n < SI_AVG_TICKS) { si_ring_n++; }
+
+    si_ticks++;
+
+    /* 抽点存波形: 整段积分过程可见 (B/X 回传), 但缓冲只有 6250 点 */
+    if ((sample_index < TOTAL_CYCLE) && ((si_ticks % si_decim) == 0U))
+    {
+        voltage_buf[sample_index]     = raw;
+        voltage_buf_ext[sample_index] = raw_ext;
+        sample_index++;
+    }
+
+    d = CodeToVInt(raw) - si_start_int;
+    if (d < 0.0f) { d = -d; }
+    if (d >= SI_RAIL_V)
+    {
+        si_short = 1U;                      /* 电流比预期大: 提前收尾, 用实际 T */
+        SmallI_Finish();
+        return;
+    }
+
+    if (si_ticks >= si_target_ticks)
+    {
+        SmallI_Finish();
+    }
+}
+
+void SmallI_Start(void)
+{
+    uint16_t raw = 0U, ext = 0U;
+    uint32_t i, guard;
+    float sum_i = 0.0f, sum_e = 0.0f;
+
+    ThresholdCodes_Init();
+
+    /* ---- 复位相 (阻塞): 拉到零位, 让两个方向的电流都有满摆幅可用 ----
+     * 与模式二同样的思路; 此刻 TIM6 未跑, 可以安全阻塞轮询 */
+    raw = Adc_ReadRaw();
+    if (raw > code_zero)
+    {
+        guard = HARD_RESET_GUARD;
+        ADG_Enable();
+        ADG_Select_Negative();
+        while ((raw > code_zero) && (guard != 0U)) { raw = Adc_ReadRaw(); guard--; }
+    }
+    else if (raw < code_zero)
+    {
+        guard = HARD_RESET_GUARD;
+        ADG_Enable();
+        ADG_Select_Positive();
+        while ((raw < code_zero) && (guard != 0U)) { raw = Adc_ReadRaw(); guard--; }
+    }
+    ADG_Disable();                          /* 断开参考: 只让被测电流积分 */
+
+    /* ---- 稳定等待 + 起点 (阻塞) ----
+     * 断开瞬间有电荷注入台阶, 必须先等它过去再取起点; 否则那一步会被
+     * 当成被测电流积出来的电压。 */
+    for (i = 0U; i < SI_SETTLE_TICKS; i++) { (void)ReadBoth(&ext); }
+    for (i = 0U; i < SI_SETTLE_TICKS; i++)
+    {
+        raw = ReadBoth(&ext);
+        sum_i += CodeToVInt(raw);
+        sum_e += CodeToVInt(ext);
+    }
+    si_start_int = sum_i / (float)SI_SETTLE_TICKS;
+    si_start_ext = sum_e / (float)SI_SETTLE_TICKS;
+
+    /* ---- 开积分 ---- */
+    si_ticks  = 0U;
+    si_ring_n = 0U;
+    si_ring_i = 0U;
+    si_done   = 0U;
+    si_short  = 0U;
+    si_decim  = (si_target_ticks > TOTAL_CYCLE) ? (si_target_ticks / TOTAL_CYCLE) : 1U;
+    sample_index = 0U;
+    window_current = 0.0f;
+    window_current_ext = 0.0f;
+
+    si_active = 1U;
+    HAL_TIM_Base_Start_IT(&htim6);
+}
+
+uint8_t SmallI_IsFinished(void) { return si_done; }
+uint8_t SmallI_IsShort(void)    { return si_short; }
+float   SmallI_GetCurrentInt(void) { return si_cur_int; }
+float   SmallI_GetCurrentExt(void) { return si_cur_ext; }
+uint32_t SmallI_GetActualTicks(void) { return last_m; }   /* 供结果行报实际积分时间 */
 
 /* ============================================================
  * 模式二: 双斜率硬积分 (电流 < 1nA)

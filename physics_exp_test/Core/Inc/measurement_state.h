@@ -27,6 +27,7 @@ MeasurementProcessResult MeasurementState_Process(void);
 MeasurementState MeasurementState_GetState(void);
 float MeasurementState_GetResult(void);
 float MeasurementState_GetResultExt(void);  /* 同一结果由 ADS8866 算出 */
+uint32_t MeasurementState_GetTicks(void);   /* 小电流模式实际积分拍数 (报告要的 T) */
 uint8_t MeasurementState_ResultIsHard(void);    /* 最近一次结果是否来自双斜率 */
 uint8_t MeasurementState_ResultIsTimeout(void);   /* 最近结果是否为模式二超时 (无有效循环, 数值无意义) */
 

@@ -101,12 +101,18 @@ static void UART_SendResultLine(float cur_int, float cur_ext, uint8_t mode,
     if ((timeout == 0U) && Cal_IsValid())
     {
         FormatCurrentNA(Cal_Apply(cur_ext), vc);
-        snprintf(line, sizeof(line), "I=%s nA X=%s nA MODE=%u CAL=%s\r\n", vi, vx, mode, vc);
+        snprintf(line, sizeof(line),
+                 "I=%s nA X=%s nA MODE=%u T=%lums CAL=%s\r\n",
+                 vi, vx, mode,
+                 (unsigned long)(MeasurementState_GetTicks() * 160U / 1000U), vc);
     }
     else
     {
-        snprintf(line, sizeof(line), "I=%s nA X=%s nA MODE=%u%s\r\n",
-                vi, vx, mode, (timeout != 0U) ? " TIMEOUT" : "");
+        snprintf(line, sizeof(line),
+                 "I=%s nA X=%s nA MODE=%u T=%lums%s\r\n",
+                 vi, vx, mode,
+                 (unsigned long)(MeasurementState_GetTicks() * 160U / 1000U),
+                 (timeout != 0U) ? " TIMEOUT" : "");
     }
     UART_SendString(line);
 }

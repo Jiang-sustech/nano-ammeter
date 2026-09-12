@@ -16,6 +16,7 @@
 static MeasurementState measurement_state;
 static float measurement_result;            /* 内置 ADC 算出的结果 */
 static float measurement_result_ext;        /* ADS8866 算出的结果 (表征以它为准) */
+static uint32_t measurement_ticks;          /* 小电流模式实际积分拍数 */
 static uint8_t result_is_hard;
 static uint8_t result_is_timeout;
 
@@ -24,6 +25,7 @@ void MeasurementState_Init(void)
     measurement_state = MEASUREMENT_STATE_IDLE;
     measurement_result = 0.0f;
     measurement_result_ext = 0.0f;
+    measurement_ticks = 0U;
     result_is_hard = 0;
     result_is_timeout = 0;
 }
@@ -80,7 +82,7 @@ MeasurementProcessResult MeasurementState_Process(void)
         {
             /* <1nA: 自动进入双斜率硬积分 (单次 10s 多循环)。
              * 上面先停了表不影响它 —— HardIntegral_Start 结束时自己会重启 */
-            HardIntegral_Start();
+            SmallI_Start();
             measurement_state = MEASUREMENT_STATE_MODE2;
             return MEASUREMENT_MODE2_STARTED;
         }
@@ -94,15 +96,17 @@ MeasurementProcessResult MeasurementState_Process(void)
         return MEASUREMENT_RESULT_READY;
 
     case MEASUREMENT_STATE_MODE2:
-        if (!HardIntegral_IsFinished())
+        if (!SmallI_IsFinished())
         {
             return MEASUREMENT_PROCESSING;
         }
 
-        result_is_timeout = HardIntegral_IsTimeout() ? 1U : 0U;
-        /* 超时 = 一个有效循环都没有, 0 只是占位: 调用方须报"不可测", 不能当零 */
-        measurement_result = result_is_timeout ? 0.0f : HardIntegral_GetCurrent();
-        measurement_result_ext = measurement_result;   /* 小电流模式自己会填外部路 */
+        /* 小电流模式没有"超时"一说: 积分撞到 3.5V 就提前收尾并按**实际**
+         * 时间计算, 结果仍然有效 (只是积分时间短了、信噪比差些)。 */
+        result_is_timeout = 0U;
+        measurement_result     = SmallI_GetCurrentInt();
+        measurement_result_ext = SmallI_GetCurrentExt();
+        measurement_ticks      = SmallI_GetActualTicks();
         result_is_hard = 1;
 
         /* 单次测量完成: 不再回到模式一 */
@@ -119,6 +123,11 @@ MeasurementState MeasurementState_GetState(void)
 float MeasurementState_GetResult(void)
 {
     return measurement_result;
+}
+
+uint32_t MeasurementState_GetTicks(void)
+{
+    return measurement_ticks;
 }
 
 float MeasurementState_GetResultExt(void)

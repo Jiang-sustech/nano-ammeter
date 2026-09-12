@@ -65,6 +65,18 @@ uint16_t Current_GetMaxCode(void);          /* 最近窗口最大码 = 上阈值
 float Current_GetSwingVoltage(void);   /* 1s 窗口内积分器电压峰峰值 (V) */
 float Current_GetNoiseVoltage(void);   /* 去趋势后每采样噪声 RMS (V) */
 
+/* ---- 小电流模式: 纯积分 + 斜率 (1 pA ~ 1 nA) ----
+ * 模式二的双斜率在 1 pA 下需要 200 秒才积得起 2V, 覆盖不到 pA 量程;
+ * 小电流直接积分、测首尾两点即可 (1pA 积 3s 才 30mV, 离轨很远)。 */
+void SmallI_Start(void);            /* 阻塞复位 + 稳定 + 取起点, 然后开积分 */
+uint8_t SmallI_IsFinished(void);
+uint8_t SmallI_IsShort(void);       /* 撞轨提前收尾 (结果有效, 但积分时间短了) */
+float SmallI_GetCurrentInt(void);   /* 内置 ADC 算出的电流 */
+float SmallI_GetCurrentExt(void);   /* ADS8866 算出的电流 (表征以它为准) */
+uint32_t SmallI_GetActualTicks(void); /* 实际积分拍数 (撞轨收尾时小于设定值) */
+void SmallI_SetSeconds(uint8_t sec);  /* 积分时长 (1~30 秒, 默认 3) */
+uint8_t SmallI_GetSeconds(void);
+
 /* ---- 模式二: 双斜率硬积分 (10s 内多循环取平均) ---- */
 void HardIntegral_Start(void);          /* 阻塞复位积分器 + 启动第一个上积循环 */
 uint8_t HardIntegral_IsFinished(void);  /* 完成(预算用尽, 至少一个有效循环)或超时 */
