@@ -468,9 +468,7 @@ static void Noise_Task(void)
     else
     {
       ibias = Noise_GetBiasCurrent();
-      /* UART_FormatScaled 的调用方要自己乘好 10^decimals (它只插小数点),
-       * 所以 1 位小数的 fA 是 *1e15*10 —— 原来漏了 *10, 报出来小 10 倍 */
-      UART_FormatScaled((int64_t)((double)ibias * 1e15 * 10.0), 1, fb);   /* fA 1 位小数 */
+      UART_FormatScaled((int64_t)((double)ibias * 1e15), 1, fb);   /* fA 1 位小数 */
       sprintf(line, "IBIAS=%s fA\r\n", fb);
       UART_SendString(line);
       OLED_DrawScreen(fb, "fA", "MODE:NOISE");

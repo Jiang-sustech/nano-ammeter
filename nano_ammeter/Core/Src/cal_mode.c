@@ -43,12 +43,9 @@ static void CalZero_Report(void)
     double dv_raw_dt = -slope_code_per_s * (3.3 / 65536.0) / (double)LEVELSHIFT_GAIN;
     double ibias = (double)C_INT * dv_raw_dt;   /* A */
 
-    /* UART_FormatScaled(v, d, buf) 把 v 当成**已经乘好 10^d 的整数**, 它只负责
-     * 插小数点。所以每个调用点都得自己把量级凑够 —— 这两处原来各少乘一次
-     * (DRIFT 少 100 倍、IB 少 10 倍), 报出来的数安静地小一个量级。 */
     UART_FormatScaled((int64_t)(v_adc_mean * 1e4), 4, v_adc);
-    UART_FormatScaled((int64_t)(dv_raw_dt * 1e6 * 100.0), 2, drift_uv);  /* µV/s */
-    UART_FormatScaled((int64_t)(ibias * 1e15 * 10.0), 1, ib_fa);         /* fA */
+    UART_FormatScaled((int64_t)(dv_raw_dt * 1e6), 2, drift_uv);  /* µV/s */
+    UART_FormatScaled((int64_t)(ibias * 1e15), 1, ib_fa);        /* fA */
 
     sprintf(buf, "CAL ZERO: N=%lu MEAN=%lu Vadc=%sV STD=%lu DRIFT=%suV/s IB=%sfA\r\n",
             (unsigned long)tick_count, (unsigned long)(mean_code + 0.5), v_adc,

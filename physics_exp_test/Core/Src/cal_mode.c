@@ -94,12 +94,9 @@ static void CalZero_Report(uint8_t brief)
     double ibias = (double)C_INT * dv_raw_dt;
     uint8_t railed = (zmax_code >= 0xFF00U || zmin_code <= 0x00FFU) ? 1U : 0U;
 
-    /* UART_FormatScaled(v, d, buf) 把 v 当成**已经乘好 10^d 的整数**, 它只负责
-     * 插小数点。所以每个调用点都得自己把量级凑够, 少乘一次就安静地报小一个
-     * 量级 —— 这四处原来就是这么错的 (DRIFT 小 100 倍、IB 小 10 倍)。 */
     UART_FormatScaled((int64_t)(v_adc_mean * 1e4), 4, v_adc);
-    UART_FormatScaled((int64_t)(dv_raw_dt * 1e6 * 100.0), 2, drift_uv);   /* µV/s */
-    UART_FormatScaled((int64_t)(ibias * 1e15 * 10.0), 1, ib_fa);          /* fA */
+    UART_FormatScaled((int64_t)(dv_raw_dt * 1e6), 2, drift_uv);
+    UART_FormatScaled((int64_t)(ibias * 1e15), 1, ib_fa);
 
     if (brief)
     {
@@ -115,10 +112,8 @@ static void CalZero_Report(uint8_t brief)
 
     /* 轮间汇总: 零点偏差 = 各轮均值的平均; 本底噪声 = 各轮均值的标准差 */
     UART_FormatScaled((int64_t)(cum_zero_code * (3.3 / 65536.0) * 1e4), 4, v_adc);
-    /* 2 位小数: fA 之外还要再乘 100 (见上面 FormatScaled 的约定) —— 原来漏了
-     * 这一乘, 把 46.9pA 的零点报成了 469fA */
-    UART_FormatScaled((int64_t)(cum_zero_code * CAL_ZERO_FA_PER_CODE * 100.0), 2, zero_fa);
-    UART_FormatScaled((int64_t)(cum_noise_code * CAL_ZERO_FA_PER_CODE * 100.0), 2, noise_fa);
+    UART_FormatScaled((int64_t)(cum_zero_code * CAL_ZERO_FA_PER_CODE), 2, zero_fa);
+    UART_FormatScaled((int64_t)(cum_noise_code * CAL_ZERO_FA_PER_CODE), 2, noise_fa);
     sprintf(buf, "CAL ZERO SUM n=%lu T=%lus: ZERO=%lu (%sV, %sfA) NOISE=%lu (%sfA RMS)\r\n",
             (unsigned long)round_count,
             (unsigned long)(round_count * CAL_ZERO_SECONDS),
