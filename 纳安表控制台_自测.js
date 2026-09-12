@@ -21,10 +21,22 @@ if (!m) { console.error('未在 HTML 中找到 <script> 块'); process.exit(2); 
 const SRC = m[1];
 
 /* ---------------- 桩: DOM ---------------- */
+/* 记录所有 draw 调用, 供断言"画了什么" (像素验证不了, 但调用序列可以) */
+const drawLog = [];
 const ctxStub = {
   fillStyle: '', strokeStyle: '', lineWidth: 0,
-  setLineDash() {}, beginPath() {}, moveTo() {}, lineTo() {},
-  stroke() {}, fillRect() {}, scale() {},
+  font: '', textAlign: '', textBaseline: '',
+  setLineDash(d) { drawLog.push(['dash', d && d.join(',')]); },
+  beginPath() { drawLog.push(['begin']); },
+  moveTo(x, y) { drawLog.push(['move', Math.round(x), Math.round(y)]); },
+  lineTo(x, y) { drawLog.push(['line', Math.round(x), Math.round(y)]); },
+  stroke() { drawLog.push(['stroke']); },
+  fill() { drawLog.push(['fill']); },
+  closePath() {},
+  fillRect() {}, scale() {}, save() {}, restore() {},
+  translate() {}, rotate() {},
+  fillText(s, x, y) { drawLog.push(['text', String(s), Math.round(x), Math.round(y)]); },
+  measureText(s) { return { width: String(s).length * 6 }; },
 };
 let elSeq = 0;
 function makeEl(id) {
@@ -42,6 +54,8 @@ function makeEl(id) {
     click() { if (!el.disabled && el.onclick) el.onclick(); },   /* 与浏览器一致: disabled 按钮 click 无效 */
     addEventListener() {},
     getContext() { return ctxStub; },
+    /* PNG 导出用: 记录最后一次导出的 blob, 供断言 */
+    toBlob(cb, type) { el._blobType = type; BlobCapture.last = new BlobCapture(['png'], { type }); cb(BlobCapture.last); },
   };
   return el;
 }
@@ -87,15 +101,25 @@ function portMatchesFilter(port, filters) {
 }
 
 /* ---------------- 环境装配: 每个测试重新 eval 脚本 ---------------- */
-let els, currentPort, navDisconnectHandler;
+let els, currentPort, navDisconnectHandler, lastCreated, lastAnchor;
 
 function setup() {
   els = {};
   currentPort = null;
   navDisconnectHandler = null;
+  lastCreated = null;
+  lastAnchor = null;
+  drawLog.length = 0;
   const document = {
     getElementById(id) { if (!els[id]) els[id] = makeEl(id); return els[id]; },
-    createElement() { return makeEl('el' + (++elSeq)); },
+    /* 必须记住 tag: log() 内部也会 createElement('div'), 会覆盖 lastCreated,
+     * 所以只跟踪 <a> (导出下载用), 否则断言会落到日志的 div 上 */
+    createElement(tag) {
+      lastCreated = makeEl('el' + (++elSeq));
+      lastCreated.tag = tag;
+      if (tag === 'a') lastAnchor = lastCreated;
+      return lastCreated;
+    },
     addEventListener() {},
     activeElement: { tagName: 'BODY' },
   };
@@ -202,10 +226,12 @@ function testWaveSameChunk() {
   /* 再喂文本, 证明没有卡在二进制模式 */
   onChunk(new TextEncoder().encode('NOISE 10/50s\r\n'));
   assert.strictEqual(els['screenState'].textContent, 'NOISE 10/50s');
-  /* CSV 内容逐点校验 */
+  /* CSV 内容逐点校验: 表头英文, t_us = 序号×160, 外部路缺省留空 */
   els['btnCsv'].click();
   assert.strictEqual(BlobCapture.last._parts.join(''),
-    'index,code\n0,1\n1,2\n2,3\n3,4\n4,5\n5,6\n6,7\n7,8\n');
+    'index,t_us,code_int,code_ext\n' +
+    '0,0,1,\n1,160,2,\n2,320,3,\n3,480,4,\n' +
+    '4,640,5,\n5,800,6,\n6,960,7,\n7,1120,8,\n');
 }
 
 /* T4: 同一字节流随机分包 25 次, 全部必须成功 */
@@ -298,7 +324,8 @@ function testBackToBack() {
   assert.strictEqual(els['screenState'].textContent, '+9.000 nA');
   els['btnCsv'].click();
   assert.strictEqual(BlobCapture.last._parts.join(''),
-    'index,code\n0,5\n1,6\n2,7\n3,8\n', 'CSV 应为第二波数据');
+    'index,t_us,code_int,code_ext\n' +
+    '0,0,5,\n1,160,6,\n2,320,7,\n3,480,8,\n', 'CSV 应为第二波数据');
 }
 
 /* T11: 诊断横幅 */
@@ -542,6 +569,146 @@ async function testNewButtons() {
   assert.strictEqual(els['btnNoiseSeries'].disabled, true, '未连接时 W 应禁用');
 }
 
+/* ---- 图表 (阶段三) ---- */
+
+/* T23: niceTicks —— 步长必须落在 1/2/5×10^n 上, 且范围必须包住输入 */
+function testNiceTicks() {
+  setup();
+  const isNice = s => {
+    const m = s / Math.pow(10, Math.floor(Math.log10(s)));
+    return [1, 2, 5].some(k => Math.abs(m - k) < 1e-9);
+  };
+  const cases = [[0, 100, 5], [2288, 65520, 6], [-100, 100, 4], [0, 1, 5], [0, 65535, 8]];
+  for (const [vmin, vmax, want] of cases) {
+    const t = niceTicks(vmin, vmax, want);
+    assert.ok(isNice(t.step), `[${vmin},${vmax}] step=${t.step} 不是整齐步长`);
+    assert.ok(t.lo <= vmin + 1e-9, `[${vmin},${vmax}] lo=${t.lo} 未包住下界`);
+    assert.ok(t.hi >= vmax - 1e-9, `[${vmin},${vmax}] hi=${t.hi} 未包住上界`);
+    const ticks = (t.hi - t.lo) / t.step;
+    assert.ok(ticks >= 1 && ticks <= want * 3, `[${vmin},${vmax}] 刻度数 ${ticks} 不合理`);
+  }
+  /* 退化输入不得抛异常也不得返回 NaN */
+  for (const [a, b] of [[5, 5], [0, 0], [10, 1], [NaN, 5], [0, Infinity]]) {
+    const t = niceTicks(a, b, 5);
+    assert.ok(isFinite(t.lo) && isFinite(t.hi) && isFinite(t.step), `退化输入 ${a},${b} 返回非有限值`);
+  }
+}
+
+/* T24: chartRange —— 阈值线必须在视野内, 否则图上根本看不到 */
+function testChartRange() {
+  setup();
+  const TH = getThresholds();     /* const 声明对测试模块不可见, 走访问器 */
+  /* 数据范围远小于阈值区间: 范围必须被撑到含两条阈值线 */
+  const r1 = chartRange([30000, 31000], null, true);
+  assert.ok(r1.lo <= TH.lower, `lo=${r1.lo} 应 <= code_lower=${TH.lower}`);
+  assert.ok(r1.hi >= TH.upper, `hi=${r1.hi} 应 >= code_upper=${TH.upper}`);
+
+  /* 不要求含阈值时: 只包住数据 (加余量) */
+  const r2 = chartRange([30000, 31000], null, false);
+  assert.ok(r2.lo <= 30000 && r2.hi >= 31000, '数据范围应被包住');
+  assert.ok(r2.hi - r2.lo < 5000, '不应被撑到阈值区间');
+
+  /* 两路数据一起参与 */
+  const r3 = chartRange([30000], [20000], false);
+  assert.ok(r3.lo <= 20000 && r3.hi >= 30000, '两路数据都应被包住');
+
+  /* 空输入 / 单点 / null 不得抛异常 */
+  for (const [a, b] of [[null, null], [[], []], [[5], null], [null, [7]]]) {
+    const r = chartRange(a, b, false);
+    assert.ok(isFinite(r.lo) && isFinite(r.hi) && r.hi > r.lo, `输入 ${JSON.stringify([a,b])} 范围非法`);
+  }
+}
+
+/* T25: 双路叠加 —— 收到 B 与 X 后, 图上应同时出现两条线 + 两条阈值线 */
+function testOverlayBothTraces() {
+  setup();
+  onChunk(new Uint8Array(waveBytes(4, [30000, 40000, 30000, 40000], '', 'WAVE')));
+  onChunk(new Uint8Array(waveBytes(4, [30001, 40001, 30001, 40001], '', 'WAVEX')));
+  const texts = drawLog.filter(d => d[0] === 'text').map(d => d[1]).join('|');
+  assert.ok(texts.includes('内置 ADC12'), '图例应含内置 ADC');
+  assert.ok(texts.includes('ADS8866'), '图例应含外部 ADS8866');
+  assert.ok(texts.includes('code_lower'), '应标注 code_lower 阈值线');
+  assert.ok(texts.includes('code_upper'), '应标注 code_upper 阈值线');
+  /* 两次绘制的线点数应各自等于数据长度 */
+  assert.ok(drawLog.some(d => d[0] === 'line'), '应画出折线');
+}
+
+/* T26: PNG 导出 —— 文件名与数据同规则, 且超时结果不得印成数值 */
+function testExportPng() {
+  setup();
+  onChunk(new Uint8Array(waveBytes(4, [1, 2, 3, 4], '\r\nI=+25.274 nA MODE=1\r\n')));
+  els['btnPng'].click();
+  assert.ok(lastAnchor && lastAnchor.download, '应创建一个带 download 的链接');
+  assert.ok(/^raw_\d\d_\d\d_\+25\.274nA\.png$/.test(lastAnchor.download),
+    `PNG 文件名不符: ${lastAnchor && lastAnchor.download}`);
+
+  /* 模式二超时: 数值无意义, 文件名应体现 TIMEOUT 而不是伪造数字 */
+  setup();
+  onChunk(new Uint8Array(waveBytes(4, [1, 2, 3, 4], '\r\nI=+0.000 nA MODE=2 TIMEOUT\r\n')));
+  els['btnPng'].click();
+  assert.ok(/^raw_\d\d_\d\d_TIMEOUT\.png$/.test(lastAnchor.download),
+    `超时 PNG 文件名不符: ${lastAnchor && lastAnchor.download}`);
+}
+
+/* T27: 内联后的统计函数必须仍与 Python 实现一致 (真实数据交叉验证)
+ * 夹具 console_src/ref_data.json 是 2026-09-11 的实采数据 (6250 点双路 + 50 点底噪),
+ * 参考值来自 tools/nanoammeter_capture.py 的 plot_only() 实际输出。
+ * 这条测试同时守住两件事: 内联没有改动函数行为, 以及移植本身是对的。 */
+function testStatsMatchPython() {
+  setup();
+  const ref = JSON.parse(fs.readFileSync(
+    path.join(__dirname, 'console_src', 'ref_data.json'), 'utf8'));
+  const wi = ref.wave_int, we = ref.wave_ext, ns = ref.noise;
+
+  const s = arrStats(wi);
+  assert.strictEqual(s.min, 2288, 'WAVE min');
+  assert.strictEqual(s.max, 65520, 'WAVE max');
+  assert.strictEqual(s.span, 63232, 'WAVE span');
+  assert.strictEqual(+s.mean.toFixed(1), 31417.9, 'WAVE mean');
+
+  const se = arrStats(we);
+  assert.strictEqual(se.min, 2243, 'WAVEX min');
+  assert.strictEqual(se.max, 65535, 'WAVEX max');
+  assert.strictEqual(se.span, 63292, 'WAVEX span');
+
+  assert.strictEqual(leadingSaturatedPrefix(wi), 38, '开头压轨前缀');
+  assert.strictEqual(countBadReads(we), 37, '外部坏读计数');
+
+  const d = diffStats(wi, we);
+  assert.strictEqual(d.n, 6213, '有效配对数');
+  assert.strictEqual(+d.mean.toFixed(2), 36.34, '外部-内置 均值');
+  assert.strictEqual(+d.rms.toFixed(2), 93.46, '外部-内置 rms');
+  assert.strictEqual(d.maxAbs, 370, '外部-内置 最大偏差');
+
+  /* 相关性/拟合必须先滤坏读 (函数本身不剔除) */
+  const av = [], ev = [];
+  for (let i = 0; i < Math.min(wi.length, we.length); i++) {
+    if (we[i] !== 0 && we[i] !== 0xFFFF) { av.push(wi[i]); ev.push(we[i]); }
+  }
+  assert.strictEqual(+correlation(av, ev).toFixed(6), 0.999986, '相关系数');
+  const f = linearFit(av, ev);
+  assert.strictEqual(+f.k.toFixed(4), 1.0004, '拟合斜率');
+  assert.strictEqual(+f.b.toFixed(2), 22.55, '拟合截距');
+
+  /* 上升沿阈值必须落在稳态摆幅中段 (本页用零位码, 由常量算出 = 30782)。
+   * Python 脚本里硬编码的是 30787, 两者差 5 码但都在中段, 结论一致 ——
+   * 这里断言"两者等价", 而不是死磕某个具体数值 */
+  const TH = getThresholds();
+  assert.ok(TH.zero > TH.lower && TH.zero < TH.upper, '零位码应落在两阈值之间');
+  const edges = risingEdges(wi, TH.zero);
+  assert.strictEqual(edges.length, 21, '上升沿个数');
+  assert.strictEqual(edgePeriod(wi, TH.zero), 301, '上升沿平均周期');
+  assert.strictEqual(risingEdges(wi, 30787).length, edges.length,
+    '阈值 30782 与 Python 用的 30787 结论应一致');
+  /* 用上阈值当判据则几乎数不到沿 —— 稳态峰值 58962 在它之下 */
+  assert.ok(risingEdges(wi, TH.upper).length < 21,
+    '用上阈值当判据应当数不到沿 —— 这正是零位码的由来');
+
+  /* 底噪: 50 点全饱和, 必须被判定为压轨 (斜率无意义) */
+  assert.strictEqual(arrStats(ns).min, 65520);
+  assert.strictEqual(arrStats(ns).max, 65520);
+}
+
 /* ---------------- 运行 ---------------- */
 (async function main() {
   console.log('纳安表控制台自测');
@@ -568,6 +735,11 @@ async function testNewButtons() {
     ['T20 三种包头隔离 + 坏校验和不污染', testThreeTagsIsolated],
     ['T21 底噪进度行不得当包头', testNoiseProgressNotAHeader],
     ['T22 新增按钮 E/X/W 指令', testNewButtons],
+    ['T23 niceTicks 整齐刻度', testNiceTicks],
+    ['T24 chartRange 含阈值线', testChartRange],
+    ['T25 双路叠加图例与阈值标注', testOverlayBothTraces],
+    ['T26 PNG 导出命名', testExportPng],
+    ['T27 统计量与 Python 一致 (真实数据)', testStatsMatchPython],
   ];
   let passed = 0, failed = 0;
   for (const [name, fn] of tests) {

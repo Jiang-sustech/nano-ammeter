@@ -8,7 +8,33 @@
 |------|------|
 | `nano_ammeter/` | **当前固件（唯一在开发的一份）**：测量状态机 + OLED 显示 + 串口协议/波形回传 + 双斜率硬积分 + 编译期标定固件 |
 | `纳安表控制台.html` | 演示用网页控制台（Web Serial API，Chrome/Edge 打开即可用） |
-| `tools/` | `uart_flash.py` 串口烧录器（AN3155 Bootloader）+ SWD 调试 TCL 脚本 |
+| `纳安表控制台_自测.js` | 控制台自测：从 HTML 提取内联脚本，在 DOM/串口桩里跑 26 项测试 |
+| `console_src/` | 纯函数模块源文件（统计量、数据存档），见下 |
+| `tools/` | `nanoammeter_capture.py` 采集脚本 + `uart_flash.py` 串口烧录器 + SWD 调试 TCL 脚本 |
+
+### console_src/ 与「内联」约定
+
+`纳安表控制台.html` 必须保持**单文件、可双击打开**，所以下面两个模块的代码是
+**内联**进 HTML 的 `<script>` 里的：
+
+| 源文件 | 内容 | 自带测试 |
+|---|---|---|
+| `console_src/stats.js` | 统计量：压轨前缀、坏读计数、差分统计、相关系数、最小二乘、上升沿 | `node console_src/stats_test.js`（45 项，与 Python 实现逐位交叉验证） |
+| `console_src/archive.js` | 数据存档：`captureStem` 命名、双路 CSV、底噪 CSV、元数据 JSON | `node console_src/archive_test.js`（18 项） |
+
+**改这两块逻辑请改 `console_src/` 的源文件，再把改后的内容贴回 HTML。**
+HTML 里对应的段落有醒目注释标出边界。`console_src/ref_data.json` 是 2026-09-11
+的实采数据夹具，供交叉验证使用。
+
+两个源文件末尾都有 `if (typeof module !== 'undefined' && module.exports)` 守卫 ——
+Node 下可 `require`，内联进浏览器时不会因 `module` 未定义而报错。
+
+改完**两处都要跑**：
+```
+node console_src/stats_test.js      # 模块自身
+node console_src/archive_test.js
+node 纳安表控制台_自测.js            # 内联后的整体（26 项）
+```
 | `中间测试/` | 历史固件归档，**只读不再开发**：见下表 |
 
 ### 中间测试/（历史归档）

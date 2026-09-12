@@ -126,12 +126,13 @@
 
   #waveCanvas {
     width: 100%;
-    height: 220px;
+    height: 320px;
     background: #0d1117;
     border: 1px solid var(--border);
     border-radius: 8px;
     display: none;
   }
+  .png-btn { font-size: 0.85rem; padding: 6px 12px; margin-left: 6px; }
   #waveInfo { color: var(--dim); font-size: 0.8rem; margin-top: 8px; display: none; }
 
   .send-row { display: flex; gap: 10px; }
@@ -207,7 +208,11 @@
 
 <!-- 波形 -->
 <div class="card">
-  <h2>最近窗口原始波形 <button id="btnCsv" disabled style="float:right">导出 CSV</button></h2>
+  <h2>最近窗口原始波形
+    <button id="btnPng" class="png-btn" disabled style="float:right">导出 PNG</button>
+    <button id="btnCsv" class="png-btn" disabled style="float:right">导出 CSV</button>
+    <button id="btnMeta" class="png-btn" disabled style="float:right">导出元数据</button>
+  </h2>
   <canvas id="waveCanvas"></canvas>
   <div id="waveInfo"></div>
 </div>
@@ -240,6 +245,9 @@ const BAUD = { baudRate: 115200, dataBits: 8, stopBits: 1, parity: 'none' };
 /* 滞回阈值 (码域, 与固件一致): 0.131V 和 2.969V -> 3.3V/65536 */
 const CODE_LOWER = Math.round(0.131 / 3.3 * 65536);
 const CODE_UPPER = Math.round(2.969 / 3.3 * 65536);
+/* 零位码 (V_adc = 1.55V)。数上升沿用这个阈值, 不能用 CODE_UPPER:
+ * 稳态峰值约 58962, 在 CODE_UPPER(58963) 之下, 用它只会数到 1 个沿 */
+const CODE_ZERO = Math.round(1.55 / 3.3 * 65536);
 
 let port = null;
 let writer = null;
@@ -248,6 +256,8 @@ let waveMode = null;    /* 二进制接收状态: {tag, need, bytes} */
 let waveData = null;    /* B: 最近窗口波形 (内置 ADC, Uint16Array) */
 let waveExtData = null; /* X: 同一窗口波形 (ADS8866 外部 16 位) */
 let noiseData = null;   /* W: 底噪逐秒序列 (50 点) */
+let lastResultLine = ''; /* 最近一条 I= 结果行, 用于给导出的文件命名 */
+let logLines = [];       /* 固件说过的每一行, 原样留档 (对应 Python 脚本的 TRANSCRIPT) */
 let busy = false;       /* 测量/底噪进行中 (禁用 S/N 与手动发送, 防指令被固件缓存排队) */
 
 /* 三种二进制块 (B/X/W) 共用一种格式, 只有包头字不同 (固件 UART_DumpBuffer)。
@@ -256,6 +266,7 @@ let busy = false;       /* 测量/底噪进行中 (禁用 S/N 与手动发送, �
 function getWaveData()    { return waveData; }
 function getWaveExtData() { return waveExtData; }
 function getNoiseData()   { return noiseData; }
+function getThresholds()  { return { lower: CODE_LOWER, upper: CODE_UPPER, zero: CODE_ZERO }; }
 
 const $ = id => document.getElementById(id);
 const logEl = $('log');
@@ -307,6 +318,7 @@ function setConnected(on, name) {
     waveMode = null;          /* 波中拔线残留 waveMode 会卡死后续文本解析 */
     rawBuf = [];
     $('btnCsv').disabled = true;
+    $('btnPng').disabled = true;
     $('screenState').className = 'idle';
     $('screenState').textContent = '—— 未连接 ——';
     $('lastRaw').textContent = '';
@@ -335,6 +347,7 @@ function setStatus(raw) {
   /* 结果行: 每次 S 只有一条 (measurement_state.c: 出结果即回 IDLE) */
   const m = raw.match(/I=([+-][0-9]+\.[0-9]+) nA MODE=(\d)/);
   if (m) {
+    lastResultLine = raw;               /* 导出文件名要用它 */
     el.textContent = `${m[1]} nA`;
     el.className = 'run';
     setBusy(false);
@@ -363,6 +376,7 @@ function setStatus(raw) {
 /* 文本行处理 */
 function onTextLine(t) {
   if (!t) return;
+  logLines.push(t);                  /* 留档: 导出的 meta.json 里带上全部协议行 */
   log('← ' + t, 'rx');
   setStatus(t);
   /* 二进制块回传头: "<tag> <count>" -> 进入二进制接收 (B=WAVE / X=WAVEX / W=NOISE)
@@ -404,8 +418,11 @@ function onWaveComplete(wm) {
   else if (wm.tag === 'WAVEX') { waveExtData = data; }
   else                         { noiseData = data; }
 
-  drawWave(wm.tag);
+  drawChart(wm.tag);
+  logStats(wm.tag);
   $('btnCsv').disabled = false;
+  $('btnPng').disabled = false;
+  $('btnMeta').disabled = false;
   updateButtons();
   /* 底噪是 1 点/秒, 与波形的 160µs/点不同轴 */
   $('waveInfo').textContent = (wm.tag === 'NOISE')
@@ -414,55 +431,492 @@ function onWaveComplete(wm) {
   $('waveInfo').style.display = 'block';
 }
 
-/* 画最近收到的那一路 (阶段三会改成双线叠加 + 坐标轴 + PNG 导出) */
-function drawWave(tag) {
-  const arr = (tag === 'WAVEX') ? waveExtData : (tag === 'NOISE') ? noiseData : waveData;
+/* ============================================================
+ * 以下两段由 console_src/stats.js 与 console_src/archive.js 内联而来
+ * (保持本页单文件、可双击打开)。那两份是开发与验证用的源头, 各自带
+ * Node 测试: 统计量已与 tools/nanoammeter_capture.py 的 Python 实现
+ * 逐位交叉验证 (45 项)。**改这两段请同步改 console_src/ 的源文件。**
+ * ============================================================ */
+/*
+ * 纳安表控制台 统计量纯函数 —— 与 tools/nanoammeter_capture.py 的 plot_only() 逐行对齐。
+ *
+ * 一致性由 stats_test.js 用 raw_09_11_+25.274nA.npz 实测数据交叉验证 (Python 实跑值)。
+ * 无 DOM / 无全局变量依赖; 会原样内联进 纳安表控制台.html 的 <script> —— 那种场合没有
+ * module 对象, 导出自动跳过, 七个函数以顶层声明形式直接可用。
+ * 只用 ES2017 及以下语法 (无 ?. / ?? / 顶层 await); 也不放 'use strict' —— 内联时若落在
+ * 宿主脚本开头, 会把整个脚本切成严格模式, 可能改变别人代码的行为。本文件两种模式等价。
+ */
+
+/* 开头连续 >= hi 的样本个数 (Python: while wi[lead] >= 65000: lead += 1)。
+ * 用于"窗口首样本应落在上阈值而非电平移位饱和码"的相验收判据。 */
+function leadingSaturatedPrefix(arr, hi = 65000) {
+  let lead = 0;
+  while (lead < arr.length && arr[lead] >= hi) lead++;
+  return lead;
+}
+
+/* ADS8866 坏读计数: 0x0000 转换未完成 / 0xFFFF DOUT 常高, 都是链路故障样本而非测量值 */
+function countBadReads(arr) {
+  let c = 0;
+  for (let i = 0; i < arr.length; i++) {
+    if (arr[i] === 0x0000 || arr[i] === 0xFFFF) c++;
+  }
+  return c;
+}
+
+/* b - a 的统计, 剔除 b 为坏读的点 (Python: bad = (e==0)|(e==0xFFFF); av,ev = a[~bad],e[~bad])。
+ * 一个 0x0000 就是 -65520 的假差异, 留着算差分只会把 mean/rms 整个拖坏, 故单独计数后剔除。
+ * 长度按短的截断 (Python: n = min(len(wi), len(we)))。
+ * 无有效点返回 0 (Python 此处给 NaN, 控制台显示 0 更好收尾)。 */
+function diffStats(a, b) {
+  const n = Math.min(a.length, b.length);
+  let cnt = 0, sum = 0, sumSq = 0, maxAbs = 0;
+  for (let i = 0; i < n; i++) {
+    if (b[i] === 0x0000 || b[i] === 0xFFFF) continue;
+    const d = b[i] - a[i];
+    cnt++;
+    sum += d;
+    sumSq += d * d;
+    const ad = d < 0 ? -d : d;
+    if (ad > maxAbs) maxAbs = ad;
+  }
+  if (cnt === 0) return { n: 0, mean: 0, rms: 0, maxAbs: 0 };
+  return { n: cnt, mean: sum / cnt, rms: Math.sqrt(sumSq / cnt), maxAbs: maxAbs };
+}
+
+/* 皮尔逊相关系数 (Python: np.corrcoef(av, ev)[0,1])。
+ * 传进来的两组数需已剔除坏读点 —— 与 diffStats 不同, 这里不做剔除, 保持纯数学:
+ * 未剔除的坏读会把 r 从 0.99998646 拉到 0.99998679, 拟合 k 更差 2.6e-5。
+ * 中心化 (先各自去均值) 求协方差, 避免 3e4 量级码值下的有效位损失。
+ * 退化输入 (任一序列方差为 0) 返回 0。 */
+function correlation(a, b) {
+  const n = Math.min(a.length, b.length);
+  if (n < 2) return 0;
+  let i, mx = 0, my = 0;
+  for (i = 0; i < n; i++) { mx += a[i]; my += b[i]; }
+  mx /= n; my /= n;
+  let sxy = 0, sxx = 0, syy = 0;
+  for (i = 0; i < n; i++) {
+    const dx = a[i] - mx, dy = b[i] - my;
+    sxy += dx * dy; sxx += dx * dx; syy += dy * dy;
+  }
+  const den = Math.sqrt(sxx * syy);
+  return den === 0 ? 0 : sxy / den;
+}
+
+/* 最小二乘拟合 y = k*x + b (Python: np.polyfit(av, ev, 1))。
+ * 用中心化公式而不是未中心化的法方程: x 在 3e4 量级时后者会丢掉有效位, 实测 k 差到
+ * 5.7e-4 (1.0010068 vs 1.0004418) —— 中心化后与 np.polyfit 逐位一致。
+ * 注意返回值里的 b 是截距, 与参数名 b 无关。 */
+function linearFit(a, b) {
+  const n = Math.min(a.length, b.length);
+  if (n < 2) return { k: 0, b: 0 };
+  let i, mx = 0, my = 0;
+  for (i = 0; i < n; i++) { mx += a[i]; my += b[i]; }
+  mx /= n; my /= n;
+  let sxy = 0, sxx = 0;
+  for (i = 0; i < n; i++) {
+    const dx = a[i] - mx, dy = b[i] - my;
+    sxy += dx * dy; sxx += dx * dx;
+  }
+  if (sxx === 0) return { k: 0, b: my };     /* 退化: 全同 x, 只能给均值 */
+  const k = sxy / sxx;
+  return { k: k, b: my - k * mx };
+}
+
+/* 带滞回的上升沿索引 (Python rising_edges 逐字对齐: x > thresh+hyst 翻高,
+ * x < thresh-hyst 翻低, 两侧都是严格不等; 沿记录在翻转的那一个样本上) */
+function risingEdges(arr, thresh, hyst = 2000) {
+  const hi = thresh + hyst, lo = thresh - hyst;
+  const idx = [];
+  let state = 0;
+  for (let i = 0; i < arr.length; i++) {
+    const x = arr[i];
+    if (state === 0 && x > hi) { state = 1; idx.push(i); }
+    else if (state === 1 && x < lo) state = 0;
+  }
+  return idx;
+}
+
+/* 上升沿平均间隔 (样本数) = mean(diff(edges)), 不足 2 个沿返回 0。
+ * 索引都是整数, 逐差求和与首末差在双精度下逐位相同, 用后者省一遍循环。 */
+function edgePeriod(arr, thresh, hyst = 2000) {
+  const e = risingEdges(arr, thresh, hyst);
+  if (e.length < 2) return 0;
+  return (e[e.length - 1] - e[0]) / (e.length - 1);
+}
+
+/* Node 侧导出 (require('./stats.js')); 内联进 HTML 时没有 module, 跳过 */
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    leadingSaturatedPrefix: leadingSaturatedPrefix,
+    countBadReads: countBadReads,
+    diffStats: diffStats,
+    correlation: correlation,
+    linearFit: linearFit,
+    risingEdges: risingEdges,
+    edgePeriod: edgePeriod,
+  };
+}
+
+/**
+ * 数据存档纯函数模块 (无 DOM、无全局变量依赖, 可被 <script> 原样内联)
+ *
+ * 职责: 把串口收到的原始数据转成存档文件文本 —— 波形/底噪 -> CSV,
+ *       测量元数据 -> JSON 字符串。CSV 给 MATLAB readmatrix 和 Origin 用。
+ *
+ * CSV 硬约束 (中文 Windows 上 MATLAB 与 Origin 对 UTF-8 的处理不一致,
+ * 带中文或带 BOM 会读成乱码甚至直接解析失败):
+ *   - 只允许 ASCII 字符, 不得有 BOM
+ *   - 表头只用英文, 不写注释行
+ *   - 数值只用十进制整数: 无千分位、无单位后缀、无科学计数法
+ *   - 换行统一 '\n' (不用 '\r\n')
+ * JSON 只给人看, 可以有中文。
+ *
+ * 语法限 ES2017: 不用 ?. / ?? / 顶层 await。
+ */
+'use strict';
+
+var TICK_US = 160;   /* 波形采样间隔 160µs/点, 与固件 WAVE/WAVEX 同窗口 */
+
+/* 固件结果行: "I=+25.274 nA MODE=1" / "I=-0.847 nA MODE=2" / "... MODE=2 TIMEOUT"
+ * 与 tools/nanoammeter_capture.py 的 RESULT_RE 保持一致; 不锚定行首,
+ * 这样 D 查询回的 "RESULT I=..." 前缀行也能取到数值 */
+var RESULT_RE = /I=([+-][0-9]+\.[0-9]+) nA MODE=([0-9])( TIMEOUT)?/;
+
+/**
+ * 结果行 -> 文件名主干 (不含扩展名), 例: raw_09_12_+25.274nA
+ * 模式二超时时电流值无意义, 用 TIMEOUT 顶替数值; 解析不出用 NO_RESULT。
+ * 正负号保留 —— 电流方向是测量结果的一部分。
+ */
+function captureStem(resultLine, ymd) {
+  var day = (ymd === null || ymd === undefined) ? '' : String(ymd);
+  var m = RESULT_RE.exec(resultLine ? String(resultLine) : '');
+  var tag;
+  if (!m) tag = 'NO_RESULT';
+  else if (m[3]) tag = 'TIMEOUT';
+  else tag = m[1] + 'nA';
+  return 'raw_' + day + '_' + tag;
+}
+
+/* 码值 -> CSV 单元格文本。源数据是 u16 整数, 这里只做防御:
+ * 坏值 (NaN/Infinity) 留空单元格, 不写 "NaN" 这种非数字 token (会卡住 readmatrix);
+ * 整数正常走 String(), 若被大数逼成科学计数法则退回 toFixed(0)。 */
+function fmtCode(v) {
+  var n = Math.round(Number(v));
+  if (!isFinite(n)) return '';
+  var s = String(n);
+  if (s.indexOf('e') >= 0 || s.indexOf('E') >= 0) s = n.toFixed(0);
+  return s;
+}
+
+/* 统一成"有 length 的东西", 容忍 null / undefined / 非数组 */
+function asArray(x) {
+  return (x && typeof x.length === 'number') ? x : [];
+}
+
+/**
+ * 双路波形 CSV。表头 "index,t_us,code_int,code_ext"
+ * 每行: 序号, 序号*160, 内置 ADC 码, ADS8866 外部码
+ * 两路长度不等时按较长的一路出行数, 短的那一路对应列留空 (不补 0,
+ * 补 0 会被当成真实码值参与统计)。末尾必有换行。
+ */
+function buildWaveCsv(intArr, extArr) {
+  var a = asArray(intArr);
+  var b = asArray(extArr);
+  var n = Math.max(a.length, b.length);
+  var out = 'index,t_us,code_int,code_ext\n';
+  for (var i = 0; i < n; i++) {
+    out += i + ',' + (i * TICK_US) + ','
+         + (i < a.length ? fmtCode(a[i]) : '') + ','
+         + (i < b.length ? fmtCode(b[i]) : '') + '\n';
+  }
+  return out;
+}
+
+/**
+ * 底噪序列 CSV (1 点/秒)。表头 "t_s,code", 每行: 秒序号, 码值, 末尾换行。
+ */
+function buildNoiseCsv(noiseArr) {
+  var a = asArray(noiseArr);
+  var out = 't_s,code\n';
+  for (var i = 0; i < a.length; i++) {
+    out += i + ',' + fmtCode(a[i]) + '\n';
+  }
+  return out;
+}
+
+/**
+ * 元数据 JSON 字符串 (缩进 2 空格)。fields 原样序列化, 允许中文。
+ */
+function buildMeta(fields) {
+  return JSON.stringify(fields === undefined ? {} : fields, null, 2);
+}
+
+/* 浏览器内联时没有 module 对象, 加守卫避免整段 <script> 抛错;
+ * 内联后四个函数是全局的, 控制台直接调用。 */
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    captureStem: captureStem,
+    buildWaveCsv: buildWaveCsv,
+    buildNoiseCsv: buildNoiseCsv,
+    buildMeta: buildMeta,
+  };
+}
+
+/* ============================================================
+ * 图表: 双路叠加 + 坐标轴 + 阈值线 + PNG 导出
+ * 计算部分 (niceTicks / chartRange) 与绘制分开, 便于自测
+ * ============================================================ */
+
+/* 取整齐刻度: 步长落在 1/2/5×10^n 上, 返回 {lo, hi, step} */
+function niceTicks(vmin, vmax, want) {
+  if (!(vmax > vmin) || !isFinite(vmin) || !isFinite(vmax)) {
+    return { lo: 0, hi: 1, step: 1 };
+  }
+  const raw = (vmax - vmin) / want;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / mag;
+  const step = mag * (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10);
+  return { lo: Math.floor(vmin / step) * step,
+           hi: Math.ceil(vmax / step) * step,
+           step: step };
+}
+
+/* 绘图范围: 数据点与阈值线都要落在里面, 上下各留 5% 余量 */
+function chartRange(intArr, extArr, withThresholds) {
+  let lo = Infinity, hi = -Infinity;
+  const scan = (a) => {
+    if (!a) return;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] < lo) lo = a[i];
+      if (a[i] > hi) hi = a[i];
+    }
+  };
+  scan(intArr);
+  scan(extArr);
+  if (withThresholds) {
+    if (CODE_LOWER < lo) lo = CODE_LOWER;   /* 阈值线必须在视野内, 否则图上看不到 */
+    if (CODE_UPPER > hi) hi = CODE_UPPER;
+  }
+  if (!isFinite(lo) || !isFinite(hi)) { lo = 0; hi = 65535; }
+  if (hi <= lo) hi = lo + 1;
+  const pad = (hi - lo) * 0.05;
+  return { lo: lo - pad, hi: hi + pad };
+}
+
+const CHART_H = 320;
+const PAD = { L: 62, R: 16, T: 26, B: 34 };   /* 左留刻度数字, 下留轴标签 */
+const CLR = { grid: 'rgba(48,54,61,0.7)', axis: '#8b949e', text: '#8b949e',
+              int: '#3fb950', ext: '#58a6ff', thr: 'rgba(210,153,34,0.65)' };
+
+function drawChart(tag) {
   const cv = $('waveCanvas');
-  const w = cv.clientWidth || 800, h = 220;
-  cv.width = w * devicePixelRatio;
-  cv.height = h * devicePixelRatio;
-  cv.style.width = w + 'px';
-  cv.style.height = h + 'px';
+  const W = cv.clientWidth || 800;
+  cv.width = W * devicePixelRatio;
+  cv.height = CHART_H * devicePixelRatio;
+  cv.style.width = W + 'px';
+  cv.style.height = CHART_H + 'px';
   cv.style.display = 'block';
   const ctx = cv.getContext('2d');
   ctx.scale(devicePixelRatio, devicePixelRatio);
+
+  const isNoise = (tag === 'NOISE');
+  const dInt = isNoise ? noiseData : waveData;      /* ADG 全断时没有内置/外部分别 */
+  const dExt = isNoise ? null : waveExtData;
+  const n = Math.max(dInt ? dInt.length : 0, dExt ? dExt.length : 0);
+
+  const px = PAD.L, py = PAD.T;
+  const pw = Math.max(1, W - PAD.L - PAD.R);
+  const ph = Math.max(1, CHART_H - PAD.T - PAD.B);
+
   ctx.fillStyle = '#0d1117';
-  ctx.fillRect(0, 0, w, h);
-
-  const n = arr ? arr.length : 0;
+  ctx.fillRect(0, 0, W, CHART_H);
   if (!n) return;
-  cv._arr = arr;                          /* 供后续导出/重绘使用 */
 
-  let vmin = 65535, vmax = 0;
-  for (let i = 0; i < n; i++) {
-    const v = arr[i];
-    if (v < vmin) vmin = v;
-    if (v > vmax) vmax = v;
+  const rng = chartRange(dInt, dExt, !isNoise);
+  const ty = niceTicks(rng.lo, rng.hi, 6);
+  rng.lo = ty.lo; rng.hi = ty.hi;                   /* 用整齐刻度当范围 */
+  const X = (i) => px + (n === 1 ? 0 : i / (n - 1) * pw);
+  const Y = (v) => py + ph - (v - rng.lo) / (rng.hi - rng.lo) * ph;
+
+  /* --- 网格 + y 刻度 --- */
+  ctx.font = '11px Consolas, monospace';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let v = rng.lo; v <= rng.hi + ty.step * 0.5; v += ty.step) {
+    const y = Math.round(Y(v)) + 0.5;
+    ctx.strokeStyle = CLR.grid;
+    ctx.beginPath(); ctx.moveTo(px, y); ctx.lineTo(px + pw, y); ctx.stroke();
+    ctx.fillStyle = CLR.text;
+    ctx.fillText(String(Math.round(v)), px - 8, y);
   }
-  const pad = (vmax - vmin) * 0.1 || 1;
-  vmin -= pad; vmax += pad;
 
-  /* 阈值虚线 (仅波形图有意义, 底噪不画) */
-  if (tag !== 'NOISE') {
-    ctx.strokeStyle = 'rgba(210,153,34,0.6)';
+  /* --- x 刻度 (序号 -> 毫秒) --- */
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const xTick = niceTicks(0, n - 1, 5);
+  for (let t = 0; t <= n - 1 && t <= xTick.hi; t += xTick.step) {
+    const x = Math.round(X(t)) + 0.5;
+    ctx.strokeStyle = CLR.grid;
+    ctx.beginPath(); ctx.moveTo(x, py); ctx.lineTo(x, py + ph); ctx.stroke();
+    ctx.fillStyle = CLR.text;
+    ctx.fillText(isNoise ? (t + 's') : ((t * 0.16).toFixed(0) + ''), x, py + ph + 6);
+  }
+  ctx.fillStyle = CLR.text;
+  ctx.fillText(isNoise ? '时间 (秒)' : '时间 (ms, 160µs/点)', px + pw / 2, py + ph + 18);
+  ctx.save();
+  ctx.translate(13, py + ph / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText('原始码', 0, 0);
+  ctx.restore();
+
+  /* --- 阈值虚线 (仅波形) --- */
+  if (!isNoise) {
     ctx.setLineDash([5, 5]);
-    [CODE_LOWER, CODE_UPPER].forEach(th => {
-      const y = h - (th - vmin) / (vmax - vmin) * h;
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    ctx.strokeStyle = CLR.thr;
+    [CODE_LOWER, CODE_UPPER].forEach((th, k) => {
+      const y = Math.round(Y(th)) + 0.5;
+      ctx.beginPath(); ctx.moveTo(px, y); ctx.lineTo(px + pw, y); ctx.stroke();
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'bottom';
+      ctx.fillStyle = CLR.thr;
+      ctx.fillText((k === 0 ? 'code_lower ' : 'code_upper ') +
+                   th + ' (' + codeVolt(th) + ')', px + 6, y - 3);
     });
     ctx.setLineDash([]);
   }
 
-  /* 波形 */
-  ctx.strokeStyle = '#3fb950';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (let i = 0; i < n; i++) {
-    const x = i / (n - 1) * w;
-    const y = h - (arr[i] - vmin) / (vmax - vmin) * h;
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  /* --- 波形: 外部先画 (在下层), 内置后画 (在上层) --- */
+  const line = (arr, color, width) => {
+    if (!arr || !arr.length) return;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    for (let i = 0; i < arr.length; i++) {
+      const x = X(i), y = Y(arr[i]);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  };
+  if (!isNoise) line(dExt, CLR.ext, 0.9);   /* 外部 16 位在下层 */
+  line(dInt, isNoise ? CLR.thr : CLR.int, isNoise ? 1.6 : 1.1);
+
+  /* --- 图例 --- */
+  const items = [];
+  if (isNoise) items.push([CLR.thr, '底噪序列 (ADG 全断, 1 点/秒)']);
+  else {
+    if (dExt) items.push([CLR.ext, 'ADS8866 16 位 (观测)']);
+    if (dInt) items.push([CLR.int, '内置 ADC12 (控制)']);
   }
-  ctx.stroke();
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  items.forEach(([c, label], k) => {
+    const x = px + 6 + k * 210;
+    ctx.strokeStyle = c; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x, 13); ctx.lineTo(x + 16, 13); ctx.stroke();
+    ctx.fillStyle = CLR.text;
+    ctx.fillText(label, x + 21, 14);
+  });
+
+  cv._arr = dInt;      /* 供 CSV 导出/统计取用 */
+  cv._arrExt = dExt;
+}
+
+/* 码值 -> 电平移位器输入电压 (V), 用于刻度标注 */
+function codeVolt(c) { return (c * 3.3 / 65536).toFixed(3) + 'V'; }
+
+/* 数组基本统计 (console_src/stats.js 里没这项, 因为 Python 侧也只是打印) */
+function arrStats(a) {
+  let lo = Infinity, hi = -Infinity, sum = 0;
+  for (let i = 0; i < a.length; i++) {
+    const v = a[i];
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+    sum += v;
+  }
+  return { min: lo, max: hi, mean: a.length ? sum / a.length : 0, span: hi - lo };
+}
+
+/* 与 tools/nanoammeter_capture.py 的 plot_only() 同口径的统计, 打到日志。
+ * 注意 correlation/linearFit **不做坏读剔除**, 必须先滤 (见 console_src/stats.js);
+ * diffStats 自带剔除, 直接喂原始数组即可 */
+function logStats(tag) {
+  if (tag === 'NOISE') {
+    const a = noiseData;
+    if (!a || !a.length) return;
+    const s = arrStats(a);
+    log(`底噪 ${a.length} 点: min=${s.min}  max=${s.max}  均值=${s.mean.toFixed(1)}`, 'sys');
+    if (s.max >= 0xFF00 || s.min <= 0x00FF) {
+      log('压轨 — 拟合斜率无意义, 这个 IBIAS 不可信', 'err');
+    }
+    return;
+  }
+  const wi = waveData, we = waveExtData;
+  if (!wi && !we) return;
+  if (wi && wi.length) {
+    const s = arrStats(wi);
+    const lead = leadingSaturatedPrefix(wi);
+    log(`内置 min=${s.min} max=${s.max} 均值=${s.mean.toFixed(1)} 跨度=${s.span}` +
+        `  开头压轨前缀=${lead}（期望 0）`, lead === 0 ? 'sys' : 'err');
+    const per = edgePeriod(wi, CODE_ZERO);
+    if (per > 0) {
+      log(`内置上升沿 ${risingEdges(wi, CODE_ZERO).length} 个,` +
+          ` 平均周期 ${per} 拍（${(per * 0.16).toFixed(2)} ms）`, 'sys');
+    }
+  }
+  if (wi && we && wi.length && we.length) {
+    const bad = countBadReads(we);
+    log(`外部坏读 ${bad} / ${we.length}（${(100 * bad / we.length).toFixed(2)}%）`,
+        bad ? 'err' : 'sys');
+    const d = diffStats(wi, we);            /* 自带坏读剔除 */
+    if (d.n > 1) {
+      const av = [], ev = [];               /* 相关性/拟合要手动滤 */
+      const n = Math.min(wi.length, we.length);
+      for (let i = 0; i < n; i++) {
+        if (we[i] !== 0 && we[i] !== 0xFFFF) { av.push(wi[i]); ev.push(we[i]); }
+      }
+      const r = correlation(av, ev);
+      const f = linearFit(av, ev);
+      log(`外部-内置（有效 ${d.n} 点）: 均值 ${d.mean >= 0 ? '+' : ''}${d.mean.toFixed(2)}` +
+          `  rms ${d.rms.toFixed(2)}  最大偏差 ${d.maxAbs}`, 'sys');
+      log(`相关系数 r=${r.toFixed(6)}   拟合 外部=${f.k.toFixed(5)}×内置` +
+          ` ${f.b >= 0 ? '+' : ''}${f.b.toFixed(2)}`, 'sys');
+    }
+  }
+}
+
+/* 今天的 MM_DD, 给文件名用 */
+function ymdNow() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  return p(d.getMonth() + 1) + '_' + p(d.getDate());
+}
+
+/* 触发一次浏览器下载 */
+function download(text, name, mime) {
+  const blob = new Blob([text], { type: mime });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  log('已导出 ' + name, 'sys');
+}
+
+/* PNG 导出: 文件名与数据文件同名 (raw_MM_DD_+X.XXXnA.png) */
+function exportPng() {
+  const cv = $('waveCanvas');
+  if (!cv || !cv.toBlob) { log('当前浏览器不支持导出 PNG', 'err'); return; }
+  const name = captureStem(lastResultLine, ymdNow()) + '.png';
+  cv.toBlob(function (blob) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    log('已导出 ' + name, 'sys');
+  });
 }
 
 /* 字节流入口: 文本与二进制混合处理
@@ -590,6 +1044,7 @@ async function connect() {
   readLoop();
   /* 同步状态: READY 只在固件上电时发一次, 后连的页面收不到; D 在空闲态被消费, 安全 */
   setTimeout(() => { if (port) send('D'); }, 200);
+  logLines = [];                /* 每次连接重新留档 */
 }
 
 async function disconnect() {
@@ -619,16 +1074,31 @@ $('btnDiag').onclick = () => send('E');
 $('btnWave').onclick = () => { $('btnCsv').disabled = true; send('B'); };
 $('btnWaveX').onclick = () => send('X');
 $('btnNoiseSeries').onclick = () => send('W');
+$('btnPng').onclick = exportPng;
+/* CSV 导出: 有底噪序列就导底噪, 否则导波形 (双路合并成一个文件, 便于
+ * MATLAB/Origin 一次读入两路对照)。表头纯英文, 无 BOM, 见 console_src/archive.js */
 $('btnCsv').onclick = () => {
-  if (!waveData) return;
-  let csv = 'index,code\n';
-  for (let i = 0; i < waveData.length; i++) csv += `${i},${waveData[i]}\n`;
-  const blob = new Blob([csv], { type: 'text/csv' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `nano_wave_${Date.now()}.csv`;
-  a.click();
-  URL.revokeObjectURL(a.href);
+  const stem = captureStem(lastResultLine, ymdNow());
+  if (noiseData && noiseData.length) {
+    download(buildNoiseCsv(noiseData), stem + '_noise.csv', 'text/csv');
+  } else if ((waveData && waveData.length) || (waveExtData && waveExtData.length)) {
+    download(buildWaveCsv(waveData, waveExtData), stem + '_wave.csv', 'text/csv');
+  } else {
+    log('没有可导出的数据', 'err');
+  }
+};
+
+/* 元数据 JSON (含中文, 只给人看; MATLAB/Origin 不读它) */
+$('btnMeta').onclick = () => {
+  download(buildMeta({
+    时间: new Date().toISOString(),
+    端口: $('portName').textContent || '',
+    结果行: lastResultLine,
+    内置点数: waveData ? waveData.length : 0,
+    外部点数: waveExtData ? waveExtData.length : 0,
+    底噪点数: noiseData ? noiseData.length : 0,
+    通信记录: logLines,
+  }), captureStem(lastResultLine, ymdNow()) + '_meta.json', 'application/json');
 };
 $('btnSend').onclick = () => {
   const inp = $('cmdInput');
