@@ -19,8 +19,15 @@
 extern UART_HandleTypeDef huart1;
 
 void MX_USART1_UART_Init(void);
+/* 整行缓冲上限 (参数化指令如 "K0,998765,-123" 需要整行) */
+#define UART_LINE_MAX 48
+
 void UART_Init_RX(void);                /* 启动单字节 RX 中断 */
 char UART_GetCommand(void);             /* 消费式读取指令, 无指令返回 0 */
+/* 消费式读取一整行 (不含行结束符)。有新行返回 1, 否则 0。
+ * 整行缓冲的意义: 原来的单字符过滤会把 "K0,998765,-123" 变成裸 'K',
+ * 参数全丢 —— 校准系数这类带参指令没法用。 */
+uint8_t UART_GetLine(char *out, uint8_t max);
 void UART_SendString(const char *str);  /* ASCII 文本发送 */
 void UART_SendBinary(const uint8_t *data, uint16_t len);  /* 二进制数据发送 */
 

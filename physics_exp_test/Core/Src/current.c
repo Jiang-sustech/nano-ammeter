@@ -73,7 +73,8 @@ static void Trace_Push(uint16_t raw_int, uint16_t raw_ext)
         trace_count++;
     }
 }
-static volatile float window_current;       /* 窗口结束瞬间(中断内)算好的电流结果 */
+static volatile float window_current;       /* 窗口结果, 由**内置 ADC** 算出 (控制路径) */
+static volatile float window_current_ext;   /* 同一窗口, 由 **ADS8866** 算出 (观测路径) */
 
 #define SEL_POS 0U
 #define SEL_NEG 1U
@@ -308,6 +309,7 @@ void Current_Process(void)
             /* 窗口完成: 中断内先算结果; 单次测量下主循环随后会停 TIM6,
              * 完整窗口数据保留在电压缓冲里供 B 指令回传 */
             window_current = Calculate_Current();
+            window_current_ext = Calculate_Current_From(voltage_buf_ext);
             finish_flag = 1;            /* 同时封存窗口, 直到消费方取走结果 */
             last_window_count = TOTAL_CYCLE;
             last_m = m_count;
@@ -415,7 +417,11 @@ void Current_Process(void)
  * 自检 (I=+25nA): 平衡要求 t_pos:t_neg = 1:3 -> m-n = -N/2 -> 补偿项
  * = -50nA*(m-n)/N = +25nA, 与输入相符。交叉配对会得 -25nA, 即补偿项反号、
  * 误差翻倍 —— 曾写在这里的 "POS 对应论文的 n" 就是那个错法。 */
-float Calculate_Current(void)
+/* 同一套式(6)计算, 但可指定用哪一路缓冲 —— 控制路径(内置)与观测路径
+ * (ADS8866) 同 tick 同索引存储, 因此可以逐点互换。
+ * 物理实验表征固件里最终结果以 ADS8866 为准 (16 位分辨率, 内置只有 12 位
+ * 左移 4 位、等效 16 码), 内置那路作为对照。 */
+float Calculate_Current_From(const uint16_t *buf)
 {
     float vo1, vo2, n_total;
     uint32_t m_span, n_span;
@@ -432,14 +438,19 @@ float Calculate_Current(void)
     m_span = m_count;
     n_span = n_count - 1U;
 
-    vo1 = CodeToVInt(voltage_buf[0]);
-    vo2 = CodeToVInt(voltage_buf[sample_index - 1U]);
+    vo1 = CodeToVInt(buf[0]);
+    vo2 = CodeToVInt(buf[sample_index - 1U]);
 
     n_total = (float)(m_span + n_span);
     n_total = C_INT * (vo1 - vo2) / (n_total * T_INT)
               - ((float)m_span * I_POS + (float)n_span * I_NEG) / n_total;
 
     return n_total;
+}
+
+float Calculate_Current(void)
+{
+    return Calculate_Current_From(voltage_buf);
 }
 
 uint8_t Current_WindowFinished(void)
@@ -456,6 +467,12 @@ void Current_ClearWindowFlag(void)
 float Current_GetWindowResult(void)
 {
     return window_current;
+}
+
+/* 同一窗口由 ADS8866 算出的结果 (未采样到时返回上一次的; 上电初值为 0) */
+float Current_GetWindowResultExt(void)
+{
+    return window_current_ext;
 }
 
 /* 可用点数: 窗口进行中返回实时计数; 完成后 (sample_index 已归零) 返回完整窗口 6250。

@@ -57,7 +57,8 @@ MEMORY
 {
 RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 48K
 RAM2 (xrw)      : ORIGIN = 0x10000000, LENGTH = 16K
-FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 256K
+/* 最后一页 (0x0803F800, 2KB) 留给校准系数, 见 cal_coef.c */
+FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 254K
 }
 
 /* Highest address of the user mode stack */

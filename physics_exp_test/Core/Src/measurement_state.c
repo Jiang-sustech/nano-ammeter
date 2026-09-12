@@ -14,7 +14,8 @@
 #define DIRECT_MEASURE_THRESHOLD 1e-9f   /* 1nA: 低于则自动进入双斜率 */
 
 static MeasurementState measurement_state;
-static float measurement_result;
+static float measurement_result;            /* 内置 ADC 算出的结果 */
+static float measurement_result_ext;        /* ADS8866 算出的结果 (表征以它为准) */
 static uint8_t result_is_hard;
 static uint8_t result_is_timeout;
 
@@ -22,6 +23,7 @@ void MeasurementState_Init(void)
 {
     measurement_state = MEASUREMENT_STATE_IDLE;
     measurement_result = 0.0f;
+    measurement_result_ext = 0.0f;
     result_is_hard = 0;
     result_is_timeout = 0;
 }
@@ -51,6 +53,7 @@ static void MeasurementState_Finish(void)
 MeasurementProcessResult MeasurementState_Process(void)
 {
     float current;
+    float current_ext;
 
     switch (measurement_state)
     {
@@ -67,6 +70,7 @@ MeasurementProcessResult MeasurementState_Process(void)
         /* 顺序要紧: 先取结果, 再停表, 最后才解除封存 —— 若先解除, 到停表
          * 之间落下一个 TIM6 中断, 会往 voltage_buf[0] 追加窗口外样本 */
         current = Current_GetWindowResult();
+        current_ext = Current_GetWindowResultExt();
         HAL_TIM_Base_Stop_IT(&htim6);
         Current_ClearWindowFlag();
 
@@ -83,6 +87,7 @@ MeasurementProcessResult MeasurementState_Process(void)
 
         /* >=1nA: 单次测量完成 */
         measurement_result = current;
+        measurement_result_ext = current_ext;
         result_is_hard = 0;
         result_is_timeout = 0;  /* 只在模式二分支赋值, 不清会把上次超时粘过来 */
         MeasurementState_Finish();
@@ -97,6 +102,7 @@ MeasurementProcessResult MeasurementState_Process(void)
         result_is_timeout = HardIntegral_IsTimeout() ? 1U : 0U;
         /* 超时 = 一个有效循环都没有, 0 只是占位: 调用方须报"不可测", 不能当零 */
         measurement_result = result_is_timeout ? 0.0f : HardIntegral_GetCurrent();
+        measurement_result_ext = measurement_result;   /* 小电流模式自己会填外部路 */
         result_is_hard = 1;
 
         /* 单次测量完成: 不再回到模式一 */
@@ -113,6 +119,11 @@ MeasurementState MeasurementState_GetState(void)
 float MeasurementState_GetResult(void)
 {
     return measurement_result;
+}
+
+float MeasurementState_GetResultExt(void)
+{
+    return measurement_result_ext;
 }
 
 uint8_t MeasurementState_ResultIsHard(void)

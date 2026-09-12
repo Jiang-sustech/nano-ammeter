@@ -40,7 +40,9 @@ void Current_Start(void);
 extern volatile uint32_t precond_timeout;
 void Current_Stop(void);               /* 停止: 停 TIM6 + 关 ADG (空闲不注入参考) */
 void Current_Process(void);            /* TIM6 中断每 160us 调用一次 */
-float Calculate_Current(void);         /* 式(6), 窗口结束时在中断内调用 */
+float Calculate_Current(void);         /* 式(6), 用内置 ADC 缓冲 (控制路径) */
+float Calculate_Current_From(const uint16_t *buf);  /* 同式(6), 指定用哪一路缓冲 */
+float Current_GetWindowResultExt(void); /* 同一窗口由 ADS8866 算出的结果 */
 uint8_t Current_WindowFinished(void);  /* 窗口完成脉冲 (每秒一次, 消费式) */
 void Current_ClearWindowFlag(void);
 float Current_GetWindowResult(void);   /* 上一窗口电流结果 (中断内算好, 无竞态) */

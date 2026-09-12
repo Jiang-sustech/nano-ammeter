@@ -23,6 +23,7 @@
 #include "button.h"
 #include "current.h"
 #include "measurement_state.h"
+#include "cal_coef.h"
 #include "cal_mode.h"
 #include <stdio.h>
 /* USER CODE END Includes */
@@ -44,7 +45,8 @@ static void Measurement_Task(void);
 static void Noise_Task(void);
 static void OLED_DrawScreen(const char *value, const char *unit, const char *mode);
 static void FormatCurrentNA(float current, char *buf);
-static void UART_SendResultLine(float current, uint8_t mode, uint8_t timeout);
+static void UART_SendResultLine(float cur_int, float cur_ext, uint8_t mode,
+                                uint8_t timeout);
 static void UART_SendResultQuery(void);
 static void UART_DumpBuffer(const char *tag, uint16_t (*get)(uint32_t), uint32_t count);
 static void UART_DumpWaveform(void);
@@ -78,14 +80,34 @@ static void FormatCurrentNA(float current, char *buf)
     UART_FormatScaled((int64_t)v, 3, buf);
 }
 
-/* 结果上报: "I=+12.345 nA MODE=1" (超时追加 " TIMEOUT" 后缀) */
-static void UART_SendResultLine(float current, uint8_t mode, uint8_t timeout)
+/* 结果行: 两个 ADC 的结果都报, 校准生效且非超时时再追加校准值。
+ *
+ *   I=<内置> X=<外部> MODE=<n> [TIMEOUT] [CAL=<校准后>]
+ *
+ * I= 保持与原固件兼容 (上位机的解析正则不锚定行尾); X= 是 ADS8866 的结果,
+ * 物理实验表征以它为准; CAL= 由 X= 经分段校准模型算出, 报告要的是它。
+ * 超时时数值无意义, 不出 CAL=。 */
+static void UART_SendResultLine(float cur_int, float cur_ext, uint8_t mode,
+                                uint8_t timeout)
 {
-    char v[24];
-    char line[64];
+    char vi[24], vx[24], vc[24];
+    /* 最坏情况: 三个值各占满 24 字节 -> 2+24+6+24+8+1+5+24+2 = 96,
+     * 再加结尾 NUL 就溢出了。留足余量并用 snprintf 兜底 */
+    char line[128];
 
-    FormatCurrentNA(current, v);
-    sprintf(line, "I=%s nA MODE=%u%s\r\n", v, mode, (timeout != 0U) ? " TIMEOUT" : "");
+    FormatCurrentNA(cur_int, vi);
+    FormatCurrentNA(cur_ext, vx);
+
+    if ((timeout == 0U) && Cal_IsValid())
+    {
+        FormatCurrentNA(Cal_Apply(cur_ext), vc);
+        snprintf(line, sizeof(line), "I=%s nA X=%s nA MODE=%u CAL=%s\r\n", vi, vx, mode, vc);
+    }
+    else
+    {
+        snprintf(line, sizeof(line), "I=%s nA X=%s nA MODE=%u%s\r\n",
+                vi, vx, mode, (timeout != 0U) ? " TIMEOUT" : "");
+    }
     UART_SendString(line);
 }
 
@@ -216,6 +238,7 @@ int main(void)
 #endif
   UART_Init_RX();
   MeasurementState_Init();
+  Cal_Init();                 /* 从 Flash 读校准系数 */
 
 #if CAL_MODE != CAL_NONE
   /* ---- 标定固件: 专属主流程 (正常固件 CAL_MODE=CAL_NONE 不编译) ---- */
@@ -265,7 +288,18 @@ int main(void)
       /* 串口指令: S=单次测量 N=底噪 D=查询结果
        *           B=回传内置 ADC 波形 X=回传 ADS8866 波形 E=观测诊断
        *           W=回传底噪逐秒序列 */
-      char cmd = UART_GetCommand();
+      /* 整行接收: 参数化指令 (K/C/Z) 需要整行; 单字符指令走同一个缓冲,
+       * 长度 1 的行就是简单指令 */
+      char line[UART_LINE_MAX];
+      char cmd = 0x00;
+
+      if (UART_GetLine(line, sizeof(line)))
+      {
+        cmd = line[0];
+        if (cmd == 'K') { Cal_HandleSetLine(line); cmd = 0x00; }
+        else if (cmd == 'C') { Cal_Report(); cmd = 0x00; }
+        else if (cmd == 'Z') { Cal_Clear(); cmd = 0x00; }
+      }
       switch (cmd)
       {
       case 'S':
@@ -394,7 +428,8 @@ static void Measurement_Task(void)
 
     has_result = 1;
     FormatCurrentNA(current, v);
-    UART_SendResultLine(current, hard ? 2U : 1U, timeout);
+    UART_SendResultLine(current, MeasurementState_GetResultExt(),
+                        hard ? 2U : 1U, timeout);
     OLED_DrawScreen(v, "nA", timeout ? "MODE2 TIMEOUT" : (hard ? "MODE:HARD" : "MODE:MEASURE"));
   }
 }
