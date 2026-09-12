@@ -180,6 +180,10 @@
       <span class="hint">指令 S · 测完自动回空闲 · 快捷键 S</span>
     </button>
   </div>
+  <button class="ctrl-btn" id="btnSeq" disabled style="margin-top:14px">
+    <span class="icon">⏩</span>一键采集
+    <span class="hint">E → S → B → X → E · 每步独立超时 · 失败只重发该步</span>
+  </button>
   <div class="sub-grid" style="margin-top:14px">
     <button id="btnQuery" disabled>🔎 查询最近结果（D）</button>
     <button id="btnDiag" disabled>🩺 观测通路自检（E）</button>
@@ -218,14 +222,14 @@
 <div class="card">
   <h2>手动指令</h2>
   <div class="send-row">
-    <input id="cmdInput" placeholder="输入指令: S / N / D / B / X / W / E" maxlength="64">
+    <input id="cmdInput" placeholder="输入指令: S / D / B / X / E" maxlength="64">
     <button id="btnSend" disabled>发送</button>
   </div>
 </div>
 
 <footer>
-  <b>使用说明：</b>① 打开台式电源给板子供电 → ② 板载 USB-C 插到电脑 → ③ 本页用 <b>Chrome / Edge</b> 打开 → ④ 点「连接串口」选 CH340 (COM 口) → ⑤ 点「单次测量」：一次点击 = 一次完整测量（1 秒窗口，<1nA 自动接 10 秒双斜率），测完自动停住显示结果。<br>
-  <b>注意：</b>烧录固件用 ST-Link；本页只负责控制与数据回传（115200 8N1）。测量期间 S 与手动发送自动禁用（结果上报后自动恢复）；板子忙时收到的指令会被丢弃并回 BUSY（本页按钮同步变灰），不会排队执行。若页面在板子测量中途打开，连接后的自动 D 查询会收到 BUSY，按钮自动变灰直到测量结束。快捷键 S 与按钮等效（输入框聚焦时除外）。
+  <b>使用说明：</b>① 打开台式电源给板子供电 → ② 板载 USB-C 插到电脑 → ③ 本页用 <b>Chrome / Edge</b> 打开 → ④ 点「连接串口」选 CH340 (COM 口) → ⑤ 点「单次测量」：一次点击 = 一次完整测量（1 秒窗口，<1nA 自动接 10 秒双斜率），测完自动停住显示结果；或点 <b>「一键采集」</b> 自动跑完 <b>E→S→B→X→E</b> 五步并画图。<br>
+  <b>注意：</b>烧录固件用 ST-Link；本页只负责控制与数据回传（115200 8N1）。<b>一键采集每步独立超时，失败只重发当前那条指令</b> —— 波形传输出错时重发 B/X 即可（数据还在 MCU 的 RAM 里），<b>不会重发 S</b>，以免白测一次还冲掉已有窗口。测量期间 S 与手动发送自动禁用（结果上报后自动恢复）；板子忙时收到的指令会被丢弃并回 BUSY（本页按钮同步变灰），不会排队执行。若页面在板子测量中途打开，连接后的自动 D 查询会收到 BUSY，按钮自动变灰直到测量结束。快捷键 S 与按钮等效（输入框聚焦时除外）。
 </footer>
 
 <script>
@@ -278,13 +282,15 @@ function escapeHtml(s) {
 /* 按钮状态 = 连接状态 ∩ busy ∩ 波形下载中 */
 function updateButtons() {
   const on = !!port;
-  const idle = !on || waveMode !== null;   /* 下载中防连点 (三种块共用一条通道) */
-  $('btnStart').disabled  = !on || busy;
+  const idle = !on || waveMode !== null;   /* 下载中防连点 (块回传共用一条通道) */
+  const sq = seqRunning();                 /* 一键采集进行中: 禁掉会干扰的单步按钮 */
+  $('btnSeq').disabled    = !on || sq || waveMode !== null || busy;
+  $('btnStart').disabled  = !on || busy || sq;
   $('btnSend').disabled   = !on || busy;
   $('btnQuery').disabled  = !on || waveMode !== null;
-  $('btnDiag').disabled   = idle;
-  $('btnWave').disabled   = idle;
-  $('btnWaveX').disabled  = idle;
+  $('btnDiag').disabled   = idle || sq;
+  $('btnWave').disabled   = idle || sq;
+  $('btnWaveX').disabled  = idle || sq;
 }
 
 /* 测量期间禁发指令: 固件是缓存排队而非忽略, 禁用以防误操作;
@@ -304,6 +310,7 @@ function setConnected(on, name) {
     busy = false;
     waveMode = null;          /* 波中拔线残留 waveMode 会卡死后续文本解析 */
     rawBuf = [];
+    seqAbort('串口断开');      /* 序列跑到一半拔线: 停掉, 别留个僵尸定时器 */
     $('btnCsv').disabled = true;
     $('btnPng').disabled = true;
     $('screenState').className = 'idle';
@@ -361,6 +368,7 @@ function onTextLine(t) {
   logLines.push(t);                  /* 留档: 导出的 meta.json 里带上全部协议行 */
   log('← ' + t, 'rx');
   setStatus(t);
+  seqOnLine(t);
   /* 二进制块回传头: "<tag> <count>" -> 进入二进制接收 (B=WAVE / X=WAVEX)
    * 必须整行精确匹配 (用 $ 收尾): 固件还有别的行以同样字头开头, 宽松匹配会把
    * 它们当成包头, 吞掉后面若干字节当二进制, 导致整条数据流错位。
@@ -400,6 +408,7 @@ function onWaveComplete(wm) {
   else                   { waveExtData = data; }
 
   drawChart(wm.tag);
+  seqOnBlock(wm);
   $('btnCsv').disabled = false;
   $('btnPng').disabled = false;
   $('btnMeta').disabled = false;
@@ -685,6 +694,108 @@ function download(text, name, mime) {
   log('已导出 ' + name, 'sys');
 }
 
+/* ============================================================
+ * 一键全流程: E -> S -> B -> X -> E
+ *
+ * 每步独立超时; 失败只**重发当前那条指令**, 不从头再来 ——
+ * 波形传输出错时重发 B/X 即可, 数据还在 MCU 的 RAM 里;
+ * 重发 S 不仅浪费一次测量, 还会把上一个窗口冲掉。
+ *
+ * 超时判定抽成 seqTick(nowMs) 便于自测直接喂模拟时间, 不必真等 20 秒。
+ * ============================================================ */
+const SEQ_RETRY = 2;                  /* 每步最多重发次数 */
+const SEQ_STEPS = [
+  { cmd: 'E', line: 'EXT ',  tag: null,    timeout: 6000,  label: '观测通路自检' },
+  { cmd: 'S', line: 'I=',    tag: null,    timeout: 25000, label: '单次测量' },
+  { cmd: 'B', line: null,    tag: 'WAVE',  timeout: 20000, label: '内置 ADC 波形' },
+  { cmd: 'X', line: null,    tag: 'WAVEX', timeout: 20000, label: 'ADS8866 波形' },
+  { cmd: 'E', line: 'EXT ',  tag: null,    timeout: 6000,  label: '复检观测通路' },
+];
+
+let seq = null;         /* {i, sentAt, attempts} 或 null */
+let seqTimer = null;
+let autoDTimer = null;  /* 连接后延迟发 D 同步状态的定时器 */
+
+function seqRunning() { return seq !== null; }
+function seqInfo() { return seq ? { i: seq.i, attempts: seq.attempts } : null; }
+
+function seqStart() {
+  if (!port) { log('未连接，无法开始', 'err'); return; }
+  if (seq) { log('一键采集正在进行中', 'err'); return; }
+  /* 连接后那条延迟 D 必须取消: 否则连上后马上点「一键采集」,
+   * D 会插进序列中间, 打乱时序 (它只回一行文本, 但会占掉一次收发) */
+  if (autoDTimer) { clearTimeout(autoDTimer); autoDTimer = null; }
+  seq = { i: 0, sentAt: Date.now(), attempts: 0 };
+  log(`=== 一键采集开始（共 ${SEQ_STEPS.length} 步）===`, 'sys');
+  seqSend();
+  seqTimer = setInterval(() => seqTick(Date.now()), 250);
+  updateButtons();
+}
+
+function seqSend() {
+  const st = SEQ_STEPS[seq.i];
+  seq.sentAt = Date.now();
+  send(st.cmd);
+  log(`[${seq.i + 1}/${SEQ_STEPS.length}] ${st.label} …`, 'sys');
+}
+
+function seqAdvance() {
+  if (!seq) return;
+  log(`    ✓ ${SEQ_STEPS[seq.i].label}`, 'rx');
+  seq.i++;
+  seq.attempts = 0;
+  if (seq.i >= SEQ_STEPS.length) { seqFinish(null); return; }
+  seqSend();
+}
+
+function seqFinish(err) {
+  if (!seq) return;
+  if (seqTimer) { clearInterval(seqTimer); seqTimer = null; }
+  if (err) {
+    log(`=== 一键采集中断：${err} ===`, 'err');
+    log('    （已收到的波形仍可单独导出；重试只重发失败那一步，不会重测）', 'sys');
+  } else {
+    log('=== 一键采集完成 ===', 'sys');
+  }
+  seq = null;
+  updateButtons();
+}
+
+function seqAbort(why) { if (seq) seqFinish(why); }
+
+/* 超时判定。由 250ms 定时器调用; 自测可直接传模拟时间戳。 */
+function seqTick(nowMs) {
+  if (!seq) return;
+  const st = SEQ_STEPS[seq.i];
+  if (nowMs - seq.sentAt < st.timeout) return;
+  seq.attempts++;
+  if (seq.attempts <= SEQ_RETRY) {
+    log(`    ! ${st.label} 超时，重发 ${st.cmd}（${seq.attempts}/${SEQ_RETRY}）`, 'err');
+    seqSend();
+  } else {
+    seqFinish(`「${st.label}」连超时 ${SEQ_RETRY + 1} 次`);
+  }
+}
+
+/* 文本行到达: 只认当前步期望的行首 */
+function seqOnLine(t) {
+  if (!seq) return;
+  if (t.indexOf('BUSY') >= 0) {
+    /* 板子还在忙: 重新计时, 不算一次失败 (S 可能在上一轮还没收尾) */
+    log('    （板子忙，继续等待）', 'sys');
+    seq.sentAt = Date.now();
+    return;
+  }
+  const st = SEQ_STEPS[seq.i];
+  if (st.line && t.indexOf(st.line) === 0) seqAdvance();
+}
+
+/* 二进制块完成 (校验和已通过才会走到这里) */
+function seqOnBlock(wm) {
+  if (!seq) return;
+  if (SEQ_STEPS[seq.i].tag === wm.tag) seqAdvance();
+}
+
 /* PNG 导出: 文件名与数据文件同名 (raw_MM_DD_+X.XXXnA.png) */
 function exportPng() {
   const cv = $('waveCanvas');
@@ -823,8 +934,10 @@ async function connect() {
   }
   log(`已连接 ${devName || '串口'}, 115200 8N1`, 'sys');
   readLoop();
-  /* 同步状态: READY 只在固件上电时发一次, 后连的页面收不到; D 在空闲态被消费, 安全 */
-  setTimeout(() => { if (port) send('D'); }, 200);
+  /* 同步状态: READY 只在固件上电时发一次, 后连的页面收不到; D 在空闲态被消费, 安全。
+   * 存下定时器句柄: 用户若在这 200ms 内点了「一键采集」, 要把它取消掉 */
+  if (autoDTimer) clearTimeout(autoDTimer);
+  autoDTimer = setTimeout(() => { autoDTimer = null; if (port) send('D'); }, 200);
   logLines = [];                /* 每次连接重新留档 */
 }
 
@@ -851,6 +964,7 @@ $('btnDisconnect').onclick = disconnect;
 $('btnStart').onclick = () => send('S');
 $('btnQuery').onclick = () => send('D');
 $('btnDiag').onclick = () => send('E');
+$('btnSeq').onclick = seqStart;
 $('btnWave').onclick = () => { $('btnCsv').disabled = true; send('B'); };
 $('btnWaveX').onclick = () => send('X');
 $('btnPng').onclick = exportPng;

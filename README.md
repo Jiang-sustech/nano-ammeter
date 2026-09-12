@@ -6,9 +6,10 @@
 
 | 目录 | 说明 |
 |------|------|
-| `nano_ammeter/` | **当前固件（唯一在开发的一份）**：测量状态机 + OLED 显示 + 串口协议/波形回传 + 双斜率硬积分 + 编译期标定固件 |
-| `纳安表控制台.html` | 演示用网页控制台（Web Serial API，Chrome/Edge 打开即可用） |
-| `纳安表控制台_自测.js` | 控制台自测：从 HTML 提取内联脚本，在 DOM/串口桩里跑 24 项测试 |
+| `nano_ammeter/` | **竞赛交付固件**：测量状态机 + OLED 显示 + 串口协议/波形回传 + 双斜率硬积分 + 编译期标定固件 |
+| `physics_exp_test/` | **实验表征固件** —— `nano_ammeter/` 的整份拷贝 + 四项表征功能（小电流模式、分段校准系数、串口写入、掉电保存）。**两个工程源码独立、会漂移**，成对关系与防漂移约定见该目录的 [README](physics_exp_test/README.md) |
+| `纳安表控制台.html` | 网页控制台（Web Serial API，Chrome/Edge 打开即可用）。**「一键采集」** 自动跑 `E→S→B→X→E`，每步独立超时、失败只重发该步 |
+| `纳安表控制台_自测.js` | 控制台自测：从 HTML 提取内联脚本，在 DOM/串口桩里跑 29 项测试 |
 | `console_src/` | 纯函数模块源文件（数据存档与命名），见下 |
 | `docs/` | **排障记录**：[调试与排障.md](docs/调试与排障.md) |
 | `tools/` | `nanoammeter_capture.py` 采集脚本 + `uart_flash.py` 串口烧录器 + SWD 调试 TCL 脚本 |
