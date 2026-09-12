@@ -54,9 +54,6 @@ uint32_t Current_GetSampleCount(void);      /* 当前窗口已采样数 (B 指�
  * 数值域相同 (0~65535), 可直接与 Current_GetSample() 逐点对照。 */
 uint16_t Current_GetExtSample(uint32_t index);   /* 外部 16 位原始码 */
 uint32_t Current_GetExtSampleCount(void);        /* 与 GetSampleCount 同口径 */
-uint16_t Current_GetExtTrace(uint32_t index);    /* 模式二逐 tick 波形 (内置 ADC) */
-uint16_t Current_GetExtTraceExt(uint32_t index); /* 模式二逐 tick 波形 (外部 ADC) */
-uint32_t Current_GetTraceCount(void);            /* 模式二波形已记录点数 (上限 2048) */
 uint32_t Current_GetExtBadRead(void);            /* 外部 ADC 坏读计数 (0x0000/0xFFFF) */
 uint32_t Current_GetMCount(void);           /* 最近完整窗口 POS 周期数 (标定用) */
 uint32_t Current_GetNCount(void);           /* 最近完整窗口 NEG 周期数 (标定用) */
@@ -76,11 +73,6 @@ uint32_t SmallI_GetActualTicks(void); /* 实际积分拍数 (撞轨收尾时小�
 void SmallI_SetSeconds(uint8_t sec);  /* 积分时长 (1~30 秒, 默认 3) */
 uint8_t SmallI_GetSeconds(void);
 
-/* ---- 模式二: 双斜率硬积分 (10s 内多循环取平均) ---- */
-void HardIntegral_Start(void);          /* 阻塞复位积分器 + 启动第一个上积循环 */
-uint8_t HardIntegral_IsFinished(void);  /* 完成(预算用尽, 至少一个有效循环)或超时 */
-uint8_t HardIntegral_IsTimeout(void);   /* 超时 (一个有效循环都没有, 约 <6pA) */
-float HardIntegral_GetCurrent(void);    /* 多循环平均电流 (含电荷注入补偿) */
 
 
 #endif

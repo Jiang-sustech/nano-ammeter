@@ -10,17 +10,11 @@
 #define T_INT        160e-6f    /* 积分周期 (TIM6 160us) */
 #define TOTAL_CYCLE  6250U      /* 1 秒窗口总采样数 */
 
-/* ADC 域阈值电压 (反相映射: V_ad = 1.55 - 0.33*V_o)
- * V_o=+4.3 (正轨) -> V_ad=0.131 = code_lower
- * V_o=-4.3 (负轨) -> V_ad=2.969 = code_upper
- * V_o=+2.0 (模式二目标) -> V_ad=0.890 = code_target */
+/* 模式一 滞回阈值对应的原始码 (反相映射: V_ad = 1.55 - 0.33*V_o)
+ * V_o=+4.3 (正轨) -> V_ad=0.131 -> code_lower
+ * V_o=-4.3 (负轨) -> V_ad=2.969 -> code_upper */
 #define V_ADC_UPPER  (LEVELSHIFT_V_ADC_ZERO - LEVELSHIFT_GAIN * THRESH_INT_LOWER)  /* 2.969 */
 #define V_ADC_LOWER  (LEVELSHIFT_V_ADC_ZERO - LEVELSHIFT_GAIN * THRESH_INT_UPPER)  /* 0.131 */
-#define V_ADC_TARGET (LEVELSHIFT_V_ADC_ZERO - LEVELSHIFT_GAIN * HARD_TARGET_INT_V) /* 0.890 */
-
-#define HARD_TIMEOUT_TICKS  (HARD_TIMEOUT_MS * 1000U / 160U)  /* 62500 tick = 10s 总预算 */
-#define HARD_DOWN_MAX_TICKS 6250U                             /* 单次下放相安全超时 1s */
-#define HARD_BASE_TICKS     3U                                /* 循环间基线采样 tick 数 */
 
 /* ---- 模式一 状态 ---- */
 static uint16_t voltage_buf[TOTAL_CYCLE];   /* 1 秒全部采样原始码, 12.5KB */
@@ -39,13 +33,6 @@ volatile uint8_t finish_flag;   /* 兼作窗口封存锁: 完成时置位, 被�
 static uint16_t voltage_buf_ext[TOTAL_CYCLE];
 static uint32_t ext_bad_read;               /* 坏读累计 (跨窗口只增不清) */
 
-/* ---- 模式二逐 tick 波形 (只记开头一段) ----
- * 1nA 时上积相约 1250 tick (C=100pF, 2V 目标 -> I/C=10V/s -> 0.2s),
- * 2048 点够覆盖一个多完整循环, 用于核对双斜率形状与外部 16 位对照 */
-#define TRACE_MAX 2048U
-static uint16_t trace_buf[TRACE_MAX];
-static uint16_t trace_buf_ext[TRACE_MAX];
-static uint32_t trace_count;
 
 /* 同拍读两路: 返回内置(控制), 经 *ext_out 带出外部(观测)。
  * 顺序固定为先内后外 —— 控制判决必须基于本 tick 最早那一刻的电平,
@@ -64,15 +51,6 @@ static uint16_t ReadBoth(uint16_t *ext_out)
 }
 
 /* 模式二逐 tick 波形入队 (满了就停, 不覆盖) */
-static void Trace_Push(uint16_t raw_int, uint16_t raw_ext)
-{
-    if (trace_count < TRACE_MAX)
-    {
-        trace_buf[trace_count] = raw_int;
-        trace_buf_ext[trace_count] = raw_ext;
-        trace_count++;
-    }
-}
 static volatile float window_current;       /* 窗口结果, 由**内置 ADC** 算出 (控制路径) */
 static volatile float window_current_ext;   /* 同一窗口, 由 **ADS8866** 算出 (观测路径) */
 
@@ -80,16 +58,6 @@ static volatile float window_current_ext;   /* 同一窗口, 由 **ADS8866** 算
 #define SEL_NEG 1U
 static volatile uint8_t sel_state;
 
-/* ---- 模式二 状态 (10s 内多循环) ---- */
-enum { HARD_IDLE = 0, HARD_UP, HARD_DOWN, HARD_BASE, HARD_DONE, HARD_TIMEOUT };
-static volatile uint8_t hard_phase = HARD_IDLE;
-static uint32_t up_ticks, down_ticks, base_ticks;
-static uint32_t total_ticks;                /* 模式二已消耗 tick (10s 预算) */
-static uint32_t base_sum;                   /* 循环间基线累加器 */
-static uint32_t cycles_done;                /* 有效上积+下放循环数 */
-static float sum_current;                   /* 各循环电流累加 (求平均) */
-static uint16_t prev_raw;
-static float t1_s, t2_s;
 
 
 /* ---- 小电流模式 (纯积分 + 斜率) 的参数与状态 ---- */
@@ -114,13 +82,9 @@ static uint8_t           si_ring_n, si_ring_i;
 
 /* 前向声明 */
 static void SmallI_Tick(uint16_t raw, uint16_t raw_ext);
-static float HardIntegral_CycleCurrent(void);   /* 单循环双斜率结果 */
 
 /* ---- ADC 域阈值 (原始码) ---- */
-static uint16_t code_upper, code_lower, code_zero, code_target;
-static uint16_t code_baseline;      /* 上积起点: 断开参考、注入稳定后实测 */
-static uint16_t code_down_start;    /* 下放起点: 反向开关闭合瞬间电压 (反推, 含注入台阶) */
-static uint16_t down_s1;            /* 下放相第一个采样, 用于反推 */
+static uint16_t code_upper, code_lower, code_zero;
 
 /* 电压 -> ADS8866 原始码 */
 static uint16_t VToCode(float v_adc)
@@ -144,22 +108,8 @@ static float CodeToVInt(uint16_t code)
 }
 
 /* 上升过阈时刻线性插值 (prev < th <= now), 返回以秒为单位 */
-static float InterpCrossUp(uint16_t prev, uint16_t now, uint16_t th, uint32_t ticks)
-{
-    float f = (now > prev) ? (float)(now - th) / (float)(now - prev) : 0.0f;
-    if (f < 0.0f) f = 0.0f;
-    if (f > 1.0f) f = 1.0f;
-    return ((float)ticks - f) * T_INT;
-}
 
 /* 下降过阈时刻线性插值 (prev > th >= now) */
-static float InterpCrossDown(uint16_t prev, uint16_t now, uint16_t th, uint32_t ticks)
-{
-    float f = (prev > now) ? (float)(th - now) / (float)(prev - now) : 0.0f;
-    if (f < 0.0f) f = 0.0f;
-    if (f > 1.0f) f = 1.0f;
-    return ((float)ticks - f) * T_INT;
-}
 
 /* 由电平移位映射计算 ADC 域阈值码 */
 static void ThresholdCodes_Init(void)
@@ -167,8 +117,6 @@ static void ThresholdCodes_Init(void)
     code_upper  = VToCode(V_ADC_UPPER);
     code_lower  = VToCode(V_ADC_LOWER);
     code_zero   = VToCode(LEVELSHIFT_V_ADC_ZERO);
-    code_target = VToCode(V_ADC_TARGET);
-    code_baseline = code_zero;
 }
 
 /* ============================================================
@@ -196,12 +144,10 @@ void Current_Start(void)
     n_count = 0;
     sample_index = 0;
     last_window_count = 0U;
-    trace_count = 0U;
     last_m = 0U;
     last_n = 0U;
     finish_flag = 0;
     sel_state = SEL_POS;        /* 默认输入正向标准电流 */
-    hard_phase = HARD_IDLE;
     si_active = 0U;
     si_done = 0U;
 
@@ -280,146 +226,53 @@ void Current_Process(void)
         return;
     }
 
-    if (hard_phase == HARD_IDLE)
+    /* ---- 模式一: 滞回 bang-bang ---- */
+    /* 结果未被取走前不再采样, 否则下一个窗口会覆写缓冲头部 */
+    if (finish_flag)
     {
-        /* ---- 模式一: 滞回 bang-bang ---- */
-        /* 结果未被取走前不再采样, 否则下一个窗口会覆写缓冲头部 */
-        if (finish_flag)
-        {
-            return;
-        }
+        return;
+    }
 
-        voltage_buf[sample_index] = raw;
-        voltage_buf_ext[sample_index] = raw_ext;
-        sample_index++;
+    voltage_buf[sample_index] = raw;
+    voltage_buf_ext[sample_index] = raw_ext;
+    sample_index++;
 
-        /* bang-bang 阈值逻辑 (反相映射, 阈值永远生效):
-         * POS(+50nA 注入) -> V_o 下降 -> V_ad 上升 -> 触 code_upper 切 NEG
-         * NEG(-50nA 注入) -> V_o 上升 -> V_ad 下降 -> 触 code_lower 切 POS
-         * (论文式(3): I+I_+ = -C*dV/dt, I_+>0 -> dV/dt<0) */
-        if (sel_state == SEL_POS)
+    /* bang-bang 阈值逻辑 (反相映射, 阈值永远生效):
+     * POS(+50nA 注入) -> V_o 下降 -> V_ad 上升 -> 触 code_upper 切 NEG
+     * NEG(-50nA 注入) -> V_o 上升 -> V_ad 下降 -> 触 code_lower 切 POS
+     * (论文式(3): I+I_+ = -C*dV/dt, I_+>0 -> dV/dt<0) */
+    if (sel_state == SEL_POS)
+    {
+        m_count++;
+        if (raw >= code_upper)
         {
-            m_count++;
-            if (raw >= code_upper)
-            {
-                sel_state = SEL_NEG;
-                ADG_Select_Negative();
-            }
-        }
-        else
-        {
-            n_count++;
-            if (raw <= code_lower)
-            {
-                sel_state = SEL_POS;
-                ADG_Select_Positive();
-            }
-        }
-
-        if (sample_index >= TOTAL_CYCLE)
-        {
-            /* 窗口完成: 中断内先算结果; 单次测量下主循环随后会停 TIM6,
-             * 完整窗口数据保留在电压缓冲里供 B 指令回传 */
-            window_current = Calculate_Current();
-            window_current_ext = Calculate_Current_From(voltage_buf_ext);
-            finish_flag = 1;            /* 同时封存窗口, 直到消费方取走结果 */
-            last_window_count = TOTAL_CYCLE;
-            last_m = m_count;
-            last_n = n_count;
-            sample_index = 0;
-            m_count = 0;
-            n_count = 0;
+            sel_state = SEL_NEG;
+            ADG_Select_Negative();
         }
     }
-    else if (hard_phase == HARD_UP)
+    else
     {
-        /* ---- 模式二: 上积相 (被测电流单独积分) ----
-         * 负电流(流出节点) -> V_o 上升 -> V_ad 下降: 过目标 = raw <= code_target */
-        Trace_Push(raw, raw_ext);
-        up_ticks++;
-        if (raw <= code_target)
+        n_count++;
+        if (raw <= code_lower)
         {
-            t1_s = InterpCrossDown(prev_raw, raw, code_target, up_ticks);
-            hard_phase = HARD_DOWN;
-            down_ticks = 0;
-            ADG_Enable();
-            ADG_Select_Positive();      /* +50nA, V_o 回落 (下放相) */
+            sel_state = SEL_POS;
+            ADG_Select_Positive();
         }
-        else if (up_ticks >= (HARD_TIMEOUT_TICKS - total_ticks))
-        {
-            /* 剩余预算内未到目标: 有历史循环取平均, 否则判超时 */
-            hard_phase = (cycles_done > 0U) ? HARD_DONE : HARD_TIMEOUT;
-            HAL_TIM_Base_Stop_IT(&htim6);
-        }
-        prev_raw = raw;
     }
-    else if (hard_phase == HARD_DOWN)
-    {
-        /* ---- 模式二: 下放相 (+50nA 拉 V_o 回落, V_ad 上升过基线) ---- */
-        Trace_Push(raw, raw_ext);
-        down_ticks++;
 
-        if (raw >= code_baseline)
-        {
-            /* 回落回到实测基线记 t2 (含过阈线性插值, 码域向上过基线) */
-            t2_s = InterpCrossUp(prev_raw, raw, code_baseline, down_ticks);
-            sum_current += HardIntegral_CycleCurrent();
-            cycles_done++;
-            total_ticks += up_ticks + down_ticks;
-            ADG_Disable();
-
-            if (total_ticks >= HARD_TIMEOUT_TICKS)
-            {
-                /* 10s 预算用尽: 结束, 结果取多循环平均 */
-                hard_phase = HARD_DONE;
-                HAL_TIM_Base_Stop_IT(&htim6);
-            }
-            else
-            {
-                /* 预算未用尽: 进入循环间基线测量 (断开参考后注入台阶
-                 * 需稳定, 基线必须重测, 不能沿用上一循环) */
-                hard_phase = HARD_BASE;
-                base_ticks = 0;
-                base_sum = 0U;
-            }
-        }
-        else if (down_ticks == 1U)
-        {
-            down_s1 = raw;
-        }
-        else if (down_ticks == 2U)
-        {
-            /* 电荷注入补偿: 闭合瞬间注入台阶瞬时完成, 之后线性放电,
-             * 用前两点反推 t=0 (切换瞬间) 的真实电压 Vc */
-            int32_t est = (int32_t)down_s1 * 2 - (int32_t)raw;
-            if (est < 0) est = 0;
-            if (est > 65535) est = 65535;
-            code_down_start = (uint16_t)est;
-        }
-        else if (down_ticks >= HARD_DOWN_MAX_TICKS)
-        {
-            /* 本循环无效: 有历史循环取平均, 否则判超时 */
-            hard_phase = (cycles_done > 0U) ? HARD_DONE : HARD_TIMEOUT;
-            HAL_TIM_Base_Stop_IT(&htim6);
-        }
-        prev_raw = raw;
-    }
-    else if (hard_phase == HARD_BASE)
+    if (sample_index >= TOTAL_CYCLE)
     {
-        /* ---- 模式二: 循环间基线实测 (ADG 已断开, 仅被测电流积分) ----
-         * 3 tick 均值, 期间被测电流 <1nA 造成的漂移 <16uV, 可忽略 */
-        Trace_Push(raw, raw_ext);
-        base_sum += raw;
-        base_ticks++;
-        if (base_ticks >= HARD_BASE_TICKS)
-        {
-            code_baseline = (uint16_t)(base_sum / HARD_BASE_TICKS);
-            code_down_start = code_target;      /* 防护默认值 */
-            up_ticks = 0U;
-            down_ticks = 0U;
-            prev_raw = raw;
-            hard_phase = HARD_UP;
-        }
+        /* 窗口完成: 中断内先算结果; 单次测量下主循环随后会停 TIM6,
+         * 完整窗口数据保留在电压缓冲里供 B 指令回传 */
+        window_current = Calculate_Current();
+        window_current_ext = Calculate_Current_From(voltage_buf_ext);
+        finish_flag = 1;            /* 同时封存窗口, 直到消费方取走结果 */
+        last_window_count = TOTAL_CYCLE;
+        last_m = m_count;
+        last_n = n_count;
+        sample_index = 0;
+        m_count = 0;
+        n_count = 0;
     }
     /* DONE/TIMEOUT: 不再采样 */
 }
@@ -519,20 +372,8 @@ uint32_t Current_GetExtSampleCount(void)
     return Current_GetSampleCount();     /* 内外同拍, 计数一致 */
 }
 
-uint16_t Current_GetExtTrace(uint32_t index)
-{
-    return (index < trace_count) ? trace_buf[index] : 0U;
-}
 
-uint16_t Current_GetExtTraceExt(uint32_t index)
-{
-    return (index < trace_count) ? trace_buf_ext[index] : 0U;
-}
 
-uint32_t Current_GetTraceCount(void)
-{
-    return trace_count;
-}
 
 uint32_t Current_GetExtBadRead(void)
 {
@@ -778,125 +619,11 @@ uint32_t SmallI_GetActualTicks(void) { return last_m; }   /* 供结果行报实�
  *  复位相: 拉回零位 (阻塞) -> 上积相: 被测电流积分到 2.0V 记 t1
  *  -> 下放相: 反向标准电流放电回零位记 t2 -> I = I_ref*t2/(t1+t2)
  * ============================================================ */
-void HardIntegral_Start(void)
-{
-    uint16_t raw;
-    uint16_t raw_ext;
-    uint32_t guard;
-    uint32_t sum = 0U;
-    uint32_t i;
 
-    hard_phase = HARD_IDLE;
-    trace_count = 0U;                   /* 逐 tick 波形从本次测量开头记起 */
 
-    /* ---- 复位相: 把积分器拉回零位 (阻塞, 最多 ~2.7ms) ----
-     * 这里刻意只读内置 ADC, 不加外部观测: 复位环靠"电压过零"退出,
-     * 每次多花 ~11us 会让过零检测晚一拍 —— 按 50nA/100pF 的 0.5mV/us 算,
-     * 超调从 ~100 码涨到 ~200 码。复位瞬态本身没有测量价值,
-     * 观测通路在此让位于控制精度 (模式二其余各相均双路采集)。 */
-    raw = Adc_ReadRaw();
-    if (raw > code_zero)
-    {
-        guard = HARD_RESET_GUARD;
-        ADG_Enable();
-        ADG_Select_Negative();          /* 降压方向 */
-        while ((raw > code_zero) && (guard != 0U))
-        {
-            raw = Adc_ReadRaw();
-            guard--;
-        }
-    }
-    else if (raw < code_zero)
-    {
-        guard = HARD_RESET_GUARD;
-        ADG_Enable();
-        ADG_Select_Positive();          /* 升压方向 */
-        while ((raw < code_zero) && (guard != 0U))
-        {
-            raw = Adc_ReadRaw();
-            guard--;
-        }
-    }
-    ADG_Disable();                      /* 断开参考: 被测电流单独积分 */
 
-    /* ---- 上积起点基线: 断开参考、电荷注入稳定后实测均值 8 点.
-     * 开关切换有注入台阶, 基线必须实测, 不能假设为标称零位 ---- */
-    for (i = 0U; i < 8U; i++)
-    {
-        uint16_t v_int = ReadBoth(&raw_ext);
-        sum += v_int;
-        Trace_Push(v_int, raw_ext);
-    }
-    code_baseline = (uint16_t)(sum / 8U);
-
-    /* ---- 上积相 (多循环状态清零) ---- */
-    up_ticks = 0;
-    down_ticks = 0;
-    base_ticks = 0;
-    total_ticks = 0;
-    cycles_done = 0U;
-    sum_current = 0.0f;
-    t1_s = 0.0f;
-    t2_s = 0.0f;
-    code_down_start = code_target;      /* 默认值: 下放未反推成功时的防护 */
-    prev_raw = ReadBoth(&raw_ext);
-    hard_phase = HARD_UP;
-    HAL_TIM_Base_Start_IT(&htim6);
-}
-
-uint8_t HardIntegral_IsFinished(void)
-{
-    return (hard_phase == HARD_DONE) || (hard_phase == HARD_TIMEOUT);
-}
-
-uint8_t HardIntegral_IsTimeout(void)
-{
-    return (hard_phase == HARD_TIMEOUT);
-}
-
-/* 单循环双斜率 + 电荷注入补偿 (反相映射, 全部用实测端点原始码:
- *   上积:  I*t1 = C*(Va - Vb)/GAIN          Va=基线码, Vb=目标码 (Vb < Va)
- *   下放:  (I + I_ref)*t2 = C*(Va - Vc)/GAIN  Vc=切换瞬间码 (前两点反推)
- *   => I = I_ref*t2*(Va-Vb) / [t1*(Va-Vc) + t2*(Va-Vb)]
- * 无注入 (Vc=Vb) 时退化为 I_ref*t2/(t1+t2)。
- * 返回取负: 上式是幅值, 而上积相覆盖的是与 I_POS 反号的那一支电流 */
-static float HardIntegral_CycleCurrent(void)
-{
-    int32_t d_up, d_down;
-    float denom;
-
-    if (t1_s <= 0.0f || t2_s <= 0.0f)
-    {
-        return 0.0f;
-    }
-
-    d_up   = (int32_t)code_baseline - (int32_t)code_target;      /* 基线->目标 (正) */
-    d_down = (int32_t)code_baseline - (int32_t)code_down_start;  /* 基线->下放起点 */
-
-    /* 防护: 注入方向异常导致下放起点不低于基线时, 退化为近似式 */
-    if (d_down <= 0)
-    {
-        return -I_POS * t2_s / (t1_s + t2_s);
-    }
-
-    denom = t1_s * (float)d_down + t2_s * (float)d_up;
-    if (denom <= 0.0f)
-    {
-        return 0.0f;
-    }
-
-    return -I_POS * t2_s * (float)d_up / denom;
-}
 
 /* 多循环平均 (10s 预算内至少 1 个有效循环) */
-float HardIntegral_GetCurrent(void)
-{
-    if (cycles_done == 0U)
-    {
-        return 0.0f;
-    }
-    return sum_current / (float)cycles_done;
-}
 
 /* ============================================================
  * 底噪/偏置电流测量: ADG 全断 -> 纯积分 1000s,
