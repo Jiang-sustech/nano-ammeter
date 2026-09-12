@@ -40,6 +40,11 @@ void MeasurementState_StartCommand(void)
     Current_Start();
     if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
     {
+        /* 启表失败必须把参考关掉。Current_Start() 已经 ADG_Enable() 并把拉回相
+         * 挂给 ISR 了 (precond_active=1), 而 TIM6 没跑起来 ISR 根本不会执行 ——
+         * 参考电流会一直注入、把积分器推到轨上待着。
+         * "空闲不注入参考"是最高优先级的安全约定, 不能靠"这条分支不会走到" */
+        Current_Stop();
         return;
     }
     measurement_state = MEASUREMENT_STATE_MODE1;

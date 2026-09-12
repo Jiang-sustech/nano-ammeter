@@ -276,6 +276,9 @@ void Current_Stop(void)
 {
     HAL_TIM_Base_Stop_IT(&htim6);
     ADG_Disable();
+    /* 拉回相的挂起标志也要清 —— 否则启表失败时 (见 MeasurementState_StartCommand)
+     * 它悬在 1, 下次 Current_Process 会先跑拉回相而不是开窗 */
+    precond_active = 0U;
 }
 
 /* TIM6 中断每 160us 调用一次 (模式一/模式二/底噪模式共用的节拍) */

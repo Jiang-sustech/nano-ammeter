@@ -34,18 +34,35 @@ physics_exp_test/    实验表征固件（本工程）
 
 ## 防漂移约定
 
-**改共享部分（`adc.c` / `ads8866.c` / `uart.c` / `sh1106.c` / `Drivers/` /
-`cmake/` / 链接脚本 / 启动文件）时，两边都要改。**
+### 必须逐字节相同的（改一边就要拷过去）
 
-改完用这条命令核对，**只应剩下那四项相关的差异**：
+```
+Core/Src/adc.c
+Core/Src/ads8866.c   Core/Inc/ads8866.h      <- 含坏读判据的驱动层, 两边同源
+Core/Src/sh1106.c
+Drivers/                                      <- 整个目录
+```
 
 ```bash
 cd nanoammeter_repo
-diff -r --exclude=build --exclude=.git --exclude=README.md \
-     nano_ammeter physics_exp_test
+for f in Core/Src/adc.c Core/Src/ads8866.c Core/Inc/ads8866.h Core/Src/sh1106.c; do
+  diff -q physics_exp_test/$f nano_ammeter/$f && echo "一致 $f"
+done
+diff -rq physics_exp_test/Drivers nano_ammeter/Drivers
 ```
 
-如果 diff 出来的东西超出预期，说明有一边漏改了。
+### **故意不同**的（不是漏改，别去"同步"）
+
+| 文件 | 差异来源 |
+|---|---|
+| `Core/Src/current.c`、`Core/Inc/current.h` | `nano_ammeter` 有**模式二**（双斜率），实验固件换成了**小电流模式**；拉回相的实现也不同（实验固件搬进了 ISR 以拿到 `V_01`） |
+| `Core/Inc/cal_mode.h`、`Core/Src/cal_mode.c` | 实验固件有 `CAL_ZERO` 重写版与分段系数 |
+| `Core/Src/uart.c`、`Core/Inc/uart.h` | 实验固件多了整行缓冲（`K`/`C`/`Z`/`Q` 参数化指令要）；`nano_ammeter` 多了 `N`/`W`（底噪，实验固件已删） |
+| `Core/Src/main.c`、`Core/Src/measurement_state.c` | 指令集与结果行格式不同 |
+| `CMakeLists.txt`、`STM32L431xx_FLASH.ld` | 工程名；实验固件要留 Flash 最后一页存校准常数 |
+| `Core/Src/cal_coef.c`、`Core/Inc/cal_coef.h` | 只有实验固件有 |
+
+> **判断标准**：差异必须能被上面这张表解释。解释不了的就是漏改。
 
 ## 构建
 
