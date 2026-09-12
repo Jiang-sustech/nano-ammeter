@@ -215,18 +215,19 @@
 <div class="card">
   <h2>手动指令</h2>
   <div class="send-row">
-    <input id="cmdInput" placeholder="输入指令: S / X / N / D / B" maxlength="64">
+    <input id="cmdInput" placeholder="输入指令: S / N / D / B" maxlength="64">
     <button id="btnSend" disabled>发送</button>
   </div>
 </div>
 
 <footer>
   <b>使用说明：</b>① 打开台式电源给板子供电 → ② 板载 USB-C 插到电脑 → ③ 本页用 <b>Chrome / Edge</b> 打开 → ④ 点「连接串口」选 CH340 (COM 口) → ⑤ 点「单次测量」：一次点击 = 一次完整测量（1 秒窗口，<1nA 自动接 10 秒双斜率），测完自动停住显示结果。<br>
-  <b>注意：</b>烧录固件用 ST-Link；本页只负责控制与数据回传（115200 8N1）。测量期间指令会被忽略，结果出来后可再次点击。快捷键 S / N 与按钮等效（输入框聚焦时除外）。
+  <b>注意：</b>烧录固件用 ST-Link；本页只负责控制与数据回传（115200 8N1）。测量/底噪期间 S/N 与手动发送自动禁用（结果上报后自动恢复）；板子忙时收到的指令会被丢弃并回 BUSY（本页按钮同步变灰），不会排队执行。若页面在板子测量中途打开，连接后的自动 D 查询会收到 BUSY，按钮自动变灰直到测量结束。快捷键 S / N 与按钮等效（输入框聚焦时除外）。
 </footer>
 
 <script>
 const CH340_FILTER = [{ usbVendorId: 0x1A86, usbProductId: 0x7523 }];
+const WCH_FILTER   = [{ usbVendorId: 0x1A86 }];   /* 任意沁恒 WCH 串口芯片 (兼容 CH340 变种) */
 const BAUD = { baudRate: 115200, dataBits: 8, stopBits: 1, parity: 'none' };
 
 /* 滞回阈值 (码域, 与固件一致): 0.131V 和 2.969V -> 3.3V/65536 */
@@ -235,10 +236,10 @@ const CODE_UPPER = Math.round(2.969 / 3.3 * 65536);
 
 let port = null;
 let writer = null;
-let rxBuf = '';
-let waveMode = null;   /* 二进制接收状态: {need, bytes} */
-let waveData = null;   /* 最近一次波形 Uint16Array */
-const decoder = new TextDecoder('stream');
+let rawBuf = [];        /* 未完成文本行的原始字节 (字节级缓存, 防 WAVE 头与二进制同包丢数据) */
+let waveMode = null;    /* 二进制接收状态: {need, bytes} */
+let waveData = null;    /* 最近一次波形 Uint16Array */
+let busy = false;       /* 测量/底噪进行中 (禁用 S/N 与手动发送, 防指令被固件缓存排队) */
 
 const $ = id => document.getElementById(id);
 const logEl = $('log');
@@ -258,26 +259,43 @@ function escapeHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+/* 按钮状态 = 连接状态 ∩ busy ∩ 波形下载中 */
+function updateButtons() {
+  const on = !!port;
+  $('btnStart').disabled  = !on || busy;
+  $('btnNoise').disabled  = !on || busy;
+  $('btnSend').disabled   = !on || busy;
+  $('btnQuery').disabled  = !on;
+  $('btnWave').disabled   = !on || waveMode !== null;
+}
+
+/* 测量/底噪期间禁发指令: 固件是缓存排队而非忽略, 禁用以防误操作;
+ * 结果行 / IBIAS / RESULT 响应 / READY 均意味着固件已回空闲 */
+function setBusy(b) {
+  busy = b;
+  updateButtons();
+}
+
 function setConnected(on, name) {
   $('connDot').classList.toggle('on', on);
   $('connState').textContent = on ? '已连接' : '未连接';
   $('portName').textContent = on ? (name || '') : '';
   $('btnConnect').disabled = on;
   $('btnDisconnect').disabled = !on;
-  $('btnStart').disabled = !on;
-  $('btnNoise').disabled = !on;
-  $('btnQuery').disabled = !on;
-  $('btnWave').disabled = !on;
-  $('btnSend').disabled = !on;
   if (!on) {
+    busy = false;
+    waveMode = null;          /* 波中拔线残留 waveMode 会卡死后续文本解析 */
+    rawBuf = [];
+    $('btnCsv').disabled = true;
     $('screenState').className = 'idle';
     $('screenState').textContent = '—— 未连接 ——';
     $('lastRaw').textContent = '';
   }
+  updateButtons();
 }
 
 /* 状态解析: 固件上报协议
- *   NANO-AMMETER READY / START MODE1 / STOP IDLE
+ *   NANO-AMMETER READY / START MODE1 / STOP IDLE (固件暂未发送, 预留)
  *   I=+12.345 nA MODE=1/2   (每秒自动上报)
  *   MODE2 START (I<1nA)     (模式二自动进入)
  *   NOISE START (50s) / NOISE 10/50s / IBIAS=+123.4 fA
@@ -285,26 +303,40 @@ function setConnected(on, name) {
 function setStatus(raw) {
   $('lastRaw').textContent = raw;
   const el = $('screenState');
-  const m = raw.match(/I=([+-][0-9]+\.[0-9]+) nA MODE=(\d)/);
-  if (m) {
-    el.textContent = `${m[1]} nA`;
-    el.className = 'run';
-    return;
-  }
-  const b = raw.match(/IBIAS=([+-][0-9]+\.[0-9]+) fA/);
-  if (b) { el.textContent = `偏置 ${b[1]} fA`; el.className = 'noise'; return; }
-  if (raw.includes('MODE2 START')) { el.textContent = '模式二运行中（双斜率）'; el.className = 'run'; return; }
-  if (raw.includes('NOISE START')) { el.textContent = '底噪标定中'; el.className = 'noise'; return; }
-  if (/NOISE \d+\/50s/.test(raw)) { el.textContent = raw; el.className = 'noise'; return; }
-  if (raw.includes('STOP IDLE')) { el.textContent = '已停止'; el.className = 'idle'; return; }
-  if (raw.includes('START MODE1')) { el.textContent = '模式一运行中'; el.className = 'run'; return; }
-  if (raw.includes('READY')) { el.textContent = '仪器在线'; el.className = 'run'; return; }
+  /* D 查询结果行必须最先判 (RESULT I=... 会被下方通用 I= 正则截获);
+   * D 只在空闲态被固件消费, 收到 RESULT 响应即证明固件已回空闲 */
   if (raw.startsWith('RESULT')) {
     const rm = raw.match(/I=([+-][0-9]+\.[0-9]+) nA MODE=(\d)/);
     if (rm) { el.textContent = `${rm[1]} nA（模式${rm[2]}）`; el.className = 'run'; }
     else if (raw.includes('NONE')) { el.textContent = '暂无结果'; el.className = 'idle'; }
+    setBusy(false);
     return;
   }
+  /* 结果行: 每次 S 只有一条 (measurement_state.c: 出结果即回 IDLE) */
+  const m = raw.match(/I=([+-][0-9]+\.[0-9]+) nA MODE=(\d)/);
+  if (m) {
+    el.textContent = `${m[1]} nA`;
+    el.className = 'run';
+    setBusy(false);
+    return;
+  }
+  const b = raw.match(/IBIAS=([+-][0-9]+\.[0-9]+) fA/);
+  if (b) { el.textContent = `偏置 ${b[1]} fA`; el.className = 'noise'; setBusy(false); return; }
+  if (raw.includes('MODE2 START')) { el.textContent = '模式二运行中（双斜率）'; el.className = 'run'; setBusy(true); return; }
+  if (raw.includes('NOISE START')) { el.textContent = '底噪标定中'; el.className = 'noise'; setBusy(true); return; }
+  if (/NOISE \d+\/50s/.test(raw)) { el.textContent = raw; el.className = 'noise'; return; }
+  if (raw.includes('STOP IDLE')) {
+    setBusy(false);
+    /* 结果行刚显示过数值时不覆盖; 只把瞬态文字换成"已停止" */
+    if (/运行中|标定中|NOISE \d+\/50s|等待|未连接/.test(el.textContent)) {
+      el.textContent = '已停止';
+      el.className = 'idle';
+    }
+    return;
+  }
+  if (raw.includes('BUSY')) { el.textContent = '板子忙碌中（指令已丢弃）'; el.className = 'noise'; setBusy(true); return; }
+  if (raw.includes('START MODE1')) { el.textContent = '模式一运行中'; el.className = 'run'; setBusy(true); return; }
+  if (raw.includes('READY')) { el.textContent = '仪器在线'; el.className = 'run'; setBusy(false); return; }
   if (raw.includes('WARN')) { el.textContent = raw; el.className = 'noise'; }
 }
 
@@ -319,14 +351,15 @@ function onTextLine(t) {
     const count = parseInt(wm[1], 10);
     if (count > 0) {
       waveMode = { need: count * 2 + 2, bytes: [] };
+      updateButtons();   /* 下载中防连点 B */
       log(`开始接收波形: ${count} 点 ...`, 'sys');
     }
   }
 }
 
 /* 二进制波形接收 + 绘图 */
-function onWaveComplete() {
-  const all = waveMode.bytes;
+function onWaveComplete(wm) {
+  const all = wm.bytes;
   const count = (all.length - 2) / 2;
   const data = new Uint16Array(count);
   for (let i = 0; i < count; i++) data[i] = all[i*2] | (all[i*2+1] << 8);
@@ -339,6 +372,7 @@ function onWaveComplete() {
   log(`波形接收完成: ${count} 点, 校验和 ${ok ? 'OK ✓' : '失败 ✗ (期望 ' + rxsum.toString(16) + ' 实际 ' + sum.toString(16) + ')'}`, ok ? 'rx' : 'err');
   drawWave();
   $('btnCsv').disabled = false;
+  updateButtons();
   $('waveInfo').textContent =
     `${count} 点 × 160µs ≈ ${(count*0.16).toFixed(0)} ms · 阈值线: code_lower=${CODE_LOWER} (0.131V), code_upper=${CODE_UPPER} (2.969V)`;
   $('waveInfo').style.display = 'block';
@@ -390,29 +424,47 @@ function drawWave() {
   ctx.stroke();
 }
 
+/* 字节流入口: 文本与二进制混合处理
+ * 文本路径按原始字节切行, 一旦解析出 WAVE 头, 行尾之后的字节立即按二进制接管 —
+ * 解决「头部与二进制同包 / 头部跨包」时开头字节被当文本吃掉的问题 */
 function onChunk(chunk) {
-  /* 二进制模式优先 */
   if (waveMode) {
-    for (const b of chunk) {
-      waveMode.bytes.push(b);
-      if (waveMode.bytes.length >= waveMode.need) {
-        const rest = chunk.slice(chunk.length - (waveMode.bytes.length - waveMode.need));
-        waveMode = null;
-        onWaveComplete();
-        onChunkText(new TextDecoder().decode(rest));
-        return;
-      }
+    /* 二进制接收: 补齐 need 个字节即完成 */
+    const need = waveMode.need - waveMode.bytes.length;
+    if (chunk.length < need) {
+      waveMode.bytes.push(...chunk);
+      return;
     }
+    waveMode.bytes.push(...chunk.slice(0, need));
+    const wm = waveMode;
+    waveMode = null;
+    onWaveComplete(wm);
+    const rest = chunk.slice(need);
+    if (rest.length) onChunk(rest);   /* 余下字节回到文本路径 */
     return;
   }
-  onChunkText(decoder.decode(chunk, { stream: true }));
+
+  /* 文本接收: 字节级行分割 */
+  let start = 0;
+  for (let i = 0; i < chunk.length; i++) {
+    if (chunk[i] !== 0x0A) continue;
+    const lineBytes = rawBuf.concat(Array.from(chunk.slice(start, i)));
+    rawBuf = [];
+    const line = new TextDecoder().decode(new Uint8Array(lineBytes)).trim();
+    if (line) onTextLine(line);
+    if (waveMode) {
+      /* 刚处理的行是 WAVE 头, 其后字节全部是二进制 */
+      const rest = chunk.slice(i + 1);
+      if (rest.length) onChunk(rest);
+      return;
+    }
+    start = i + 1;
+  }
+  rawBuf = rawBuf.concat(Array.from(chunk.slice(start)));
 }
 
-function onChunkText(text) {
-  rxBuf += text;
-  const lines = rxBuf.split(/\r?\n/);
-  rxBuf = lines.pop();
-  for (const line of lines) onTextLine(line.trim());
+function releaseWriter() {
+  if (writer) { try { writer.releaseLock(); } catch (_) {} writer = null; }
 }
 
 async function readLoop() {
@@ -427,6 +479,7 @@ async function readLoop() {
   } catch (e) { /* 设备断开 */ }
   if (port === currentPort) {
     port = null;
+    releaseWriter();            /* 防止拔出后重连复用失效 writer */
     setConnected(false);
     log('串口已断开', 'err');
   }
@@ -443,6 +496,18 @@ async function send(cmd) {
   }
 }
 
+/* 按 USB VID:PID 识别设备 — 连接后端口名不再一律显示 CH340 */
+function describePort(info) {
+  const vid = info && info.usbVendorId, pid = info && info.usbProductId;
+  if (vid === 0x1A86 && pid === 0x7523) return 'CH340';
+  if (vid === 0x0483) return 'ST-Link VCP';   /* 0483:3748/374B/374E/374F/3752/3753 */
+  if (vid) {
+    const h = n => n.toString(16).padStart(4, '0').toUpperCase();
+    return 'USB ' + h(vid) + ':' + h(pid || 0);
+  }
+  return '';
+}
+
 async function connect() {
   if (!('serial' in navigator)) {
     log('当前浏览器不支持 Web Serial，请使用 Chrome 或 Edge 打开本页', 'err');
@@ -453,13 +518,19 @@ async function connect() {
     p = await navigator.serial.requestPort(CH340_FILTER);
   } catch (e) {
     if (e.name !== 'NotFoundError') log('选择串口失败: ' + e.message, 'err');
-    /* 过滤条件匹配不到时, 不加过滤再试一次 (显示所有可用串口) */
+    /* 精确 CH340 匹配不到: 放宽到任意 WCH 芯片 (CH340 变种), 仍无则列出全部并警告 */
     try {
-      log('按过滤条件未找到 CH340, 改为列出所有串口 ...', 'sys');
-      p = await navigator.serial.requestPort();
+      log('未找到 CH340 (1A86:7523), 改为列出所有 WCH 串口芯片 ...', 'sys');
+      p = await navigator.serial.requestPort(WCH_FILTER);
     } catch (e2) {
       if (e2.name !== 'NotFoundError') log('选择串口失败: ' + e2.message, 'err');
-      return;
+      try {
+        log('未找到任何 WCH 串口芯片 — 列出全部串口: ST-Link VCP 也会出现, 请勿选择!', 'err');
+        p = await navigator.serial.requestPort();
+      } catch (e3) {
+        if (e3.name !== 'NotFoundError') log('选择串口失败: ' + e3.message, 'err');
+        return;
+      }
     }
   }
   try {
@@ -469,14 +540,22 @@ async function connect() {
     return;
   }
   port = p;
-  setConnected(true, port.getInfo().usbProductId ? 'CH340' : '');
-  log(`已连接 CH340, 115200 8N1`, 'sys');
+  const devName = describePort(p.getInfo());
+  setConnected(true, devName);
+  if (devName !== 'CH340') {
+    log(`警告: 当前设备是 ${devName || '未知设备'}, 不是 CH340 (1A86:7523) — 指令可能发到错误端口`, 'err');
+  }
+  log(`已连接 ${devName || '串口'}, 115200 8N1`, 'sys');
   readLoop();
+  /* 同步状态: READY 只在固件上电时发一次, 后连的页面收不到; D 在空闲态被消费, 安全 */
+  setTimeout(() => { if (port) send('D'); }, 200);
 }
 
 async function disconnect() {
-  if (writer) { try { writer.releaseLock(); } catch(_){} writer = null; }
-  if (port) { try { await port.close(); } catch(_){} port = null; }
+  const p = port;
+  port = null;                  /* 先置空, readLoop 收尾不会再误判断连 */
+  releaseWriter();
+  if (p) { try { await p.close(); } catch (_) {} }
   setConnected(false);
   log('已主动断开', 'sys');
 }
@@ -484,6 +563,7 @@ async function disconnect() {
 navigator.serial?.addEventListener('disconnect', e => {
   if (e.target === port) {
     port = null;
+    releaseWriter();            /* 拔出后重连必须用新 writer */
     setConnected(false);
     log('设备已拔出', 'err');
   }
