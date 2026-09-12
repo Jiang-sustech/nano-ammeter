@@ -2,19 +2,23 @@
 """
 nano_ammeter: full UART data return + plot
 
-Sequence (one shot, ~65 s):
+Sequence (one shot):
     E                -> observation-path health line
     S                -> single measurement, wait for I= result
     B                -> internal ADC12 (control path) window, 6250 pts
     X                -> ADS8866 16-bit (observation path) same window
     E                -> health line again (bad reads must stay put)
-    N                -> 50 s bias/noise run
-    W                -> the 50 per-second points
+    N                -> 50 s bias/noise run           (--no-noise 时跳过)
+    W                -> the 50 per-second points      (--no-noise 时跳过)
 
 Writes raw_<MM_DD>_<value>nA.npz (everything) + matching .png and .log
 
-Usage: python nanoammeter_capture.py [PORT]
+Usage: python nanoammeter_capture.py [PORT] [--no-noise]
        python nanoammeter_capture.py --replot [FILE.npz]
+
+--no-noise: 跳过 N/W 两步。physics_exp_test 已删除底噪指令 (见该工程
+README「两个工程的分工」), 对着它跑不加这个开关会在第 7 步干等 90 秒后抛
+TimeoutError —— 而 np.savez 在那之后, 结果是一个文件都写不出来。
 """
 import glob
 import os
@@ -29,14 +33,28 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-PORT = sys.argv[1] if len(sys.argv) > 1 else "COM7"
 BAUD = 115200
 CODE_ZERO = 30787          # 1.55 V level-shift zero, internal code domain
 RAIL_HI = 65520            # measured positive rail of the internal ADC path
 
+# 位置参数只有一个 (端口), 其余是开关 —— 开关不能顶到 PORT 的位置上
+DO_NOISE = "--no-noise" not in sys.argv
+_rest = [a for a in sys.argv[1:] if not a.startswith("--")]
+PORT = _rest[0] if _rest else "COM7"
+
 # 固件说过的每一行 ASCII, 原样留档 (以前只存三个数组, 结果行/健康行全丢了)
 TRANSCRIPT = []
-RESULT_RE = re.compile(r"I=([+-][0-9]+\.[0-9]+) nA MODE=(\d)( TIMEOUT)?")
+
+# 两代结果行的并集。nano_ammeter:  "I=+25.274 nA MODE=1"
+#                      physics_exp_test: "I=<内置> X=<外部> MODE=1 T=1000ms [CAL=..]"
+# X= / T= 都是可选 —— 用 `nA MODE=` 直接匹配会在第二行格式上落空 (中间隔着 X=),
+# 于是 capture_name 退化成 NO_RESULT、result_na 变 NaN, 所以必须留出那一段。
+RESULT_RE = re.compile(
+    r"I=(?P<i>[+-][0-9]+\.[0-9]+) nA"
+    r"(?: X=(?P<x>[+-][0-9]+\.[0-9]+) nA)?"
+    r" MODE=(?P<mode>[0-9])"
+    r"(?: T=(?P<t>[0-9]+)ms)?"
+    r"(?P<timeout> TIMEOUT)?")
 
 
 def read_exact(ser, n, timeout):
@@ -126,15 +144,15 @@ def rising_edges(v, thresh, hyst=2000):
 
 
 def capture_name(result_line):
-    """raw_<MM_DD>_<value>nA.npz —— 模式二超时时数值无意义, 用 TIMEOUT 顶替"""
+    """raw_<MM_DD>_<value>nA.npz —— 超时时数值无意义, 用 TIMEOUT 顶替"""
     day = time.strftime("%m_%d")
     m = RESULT_RE.search(result_line or "")
     if m is None:
         tag = "NO_RESULT"
-    elif m.group(3):
+    elif m.group("timeout"):
         tag = "TIMEOUT"
     else:
-        tag = "%snA" % m.group(1)           # 例: +25.274nA
+        tag = "%snA" % m.group("i")         # 例: +25.274nA
     path = "raw_%s_%s.npz" % (day, tag)
     n = 2
     while os.path.exists(path):             # 同名不覆盖, 加序号
@@ -177,13 +195,17 @@ def main():
     ser.write(b"E\n")
     wait_line(ser, "EXT ", 5.0)
 
-    print("[7] N: 50 s bias run")
-    ser.write(b"N\n")
-    wait_line(ser, "IBIAS=", 90.0)
+    if DO_NOISE:
+        print("[7] N: 50 s bias run")
+        ser.write(b"N\n")
+        wait_line(ser, "IBIAS=", 90.0)
 
-    print("[8] W: per-second series")
-    ser.write(b"W\n")
-    out["noise"] = read_block(ser, "NOISE", timeout=30.0)
+        print("[8] W: per-second series")
+        ser.write(b"W\n")
+        out["noise"] = read_block(ser, "NOISE", timeout=30.0)
+    else:
+        print("[7/8] 跳过底噪 (--no-noise)")
+        out["noise"] = np.zeros(0, dtype=np.int64)
 
     ser.close()
 
@@ -196,9 +218,11 @@ def main():
         wave_int=wi, wave_ext=we, noise=ns,
         lines=np.array(TRANSCRIPT),            # 固件说过的每一行, 原样留档
         result_line=result_line,
-        result_na=(float(m.group(1)) if m else np.nan),
-        result_mode=(int(m.group(2)) if m else 0),
-        result_timeout=(bool(m.group(3)) if m else False),
+        result_na=(float(m.group("i")) if m else np.nan),
+        result_ext_na=(float(m.group("x")) if (m and m.group("x")) else np.nan),
+        result_mode=(int(m.group("mode")) if m else 0),
+        result_time_ms=(int(m.group("t")) if (m and m.group("t")) else 0),
+        result_timeout=(bool(m.group("timeout")) if m else False),
         timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
         port=PORT,
     )
@@ -238,7 +262,11 @@ def plot_only(wi, we, ns, path="nanoammeter_data.npz"):
         r = np.corrcoef(av, ev)[0, 1]
         k, b = np.polyfit(av, ev, 1)
         print("     correlation r=%.6f   fit ext=%.5f*int %+.2f" % (r, k, b))
-    stats("NOISE", ns)
+    has_noise = ns is not None and len(ns) > 0
+    if has_noise:
+        stats("NOISE", ns)
+    else:
+        print("     NOISE  (--no-noise, 本次未采)")
 
     edges = rising_edges(wi, CODE_ZERO)
     if len(edges) > 1:
@@ -247,7 +275,8 @@ def plot_only(wi, we, ns, path="nanoammeter_data.npz"):
               % (len(edges), per.mean(), per.mean() * 0.160))
 
     # ---------------- plot ----------------
-    fig, ax = plt.subplots(3, 1, figsize=(12, 11))
+    fig, ax = plt.subplots(3 if has_noise else 2, 1,
+                           figsize=(12, 11 if has_noise else 7.5))
 
     ax[0].plot(np.arange(len(wi)), wi, lw=0.6, color="#1f77b4",
                label="internal ADC12 (control path)")
@@ -269,20 +298,23 @@ def plot_only(wi, we, ns, path="nanoammeter_data.npz"):
     ax[1].set_ylabel("code difference")
     ax[1].grid(alpha=0.3)
 
-    xs = np.arange(len(ns))
-    ax[2].plot(xs, ns, "o-", ms=4, lw=1.0, color="#d62728")
-    ax[2].axhline(RAIL_HI, color="black", ls="--", lw=0.9,
-                  label="positive rail (%d)" % RAIL_HI)
-    ax[2].set_title("Bias run: integrator code, 1 point/s (ADG off, pure integration)")
-    ax[2].set_xlabel("time (s)")
-    ax[2].set_ylabel("raw code")
-    ax[2].legend(loc="best", fontsize=8)
-    ax[2].grid(alpha=0.3)
-    if len(ns) > 0 and (ns.min() >= 0xFF00 or ns.max() <= 0x00FF):
-        ax[2].text(0.5, 0.78, "SATURATED - slope is meaningless",
-                   transform=ax[2].transAxes, ha="center", fontsize=13,
-                   color="red", weight="bold")
+    if has_noise:
+        xs = np.arange(len(ns))
+        ax[2].plot(xs, ns, "o-", ms=4, lw=1.0, color="#d62728")
+        ax[2].axhline(RAIL_HI, color="black", ls="--", lw=0.9,
+                      label="positive rail (%d)" % RAIL_HI)
+        ax[2].set_title("Bias run: integrator code, 1 point/s (ADG off, pure integration)")
+        ax[2].set_xlabel("time (s)")
+        ax[2].set_ylabel("raw code")
+        ax[2].legend(loc="best", fontsize=8)
+        ax[2].grid(alpha=0.3)
+        if ns.min() >= 0xFF00 or ns.max() <= 0x00FF:
+            ax[2].text(0.5, 0.78, "SATURATED - slope is meaningless",
+                       transform=ax[2].transAxes, ha="center", fontsize=13,
+                       color="red", weight="bold")
 
+    # 文件名带着被测电流值, 直接当标题 —— 三张图并排看时不用猜哪张是哪张
+    fig.suptitle(os.path.basename(path)[:-4], fontsize=12, weight="bold")
     fig.tight_layout()
     fig.savefig(path[:-4] + ".png", dpi=130)
     print("\nwrote %s + %s" % (path[:-4] + ".png", path))

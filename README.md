@@ -12,7 +12,25 @@
 | `纳安表控制台_自测.js` | 控制台自测：从 HTML 提取内联脚本，在 DOM/串口桩里跑 36 项测试 |
 | `console_src/` | 纯函数模块源文件（数据存档与命名），见下 |
 | `docs/` | **排障记录**：[调试与排障.md](docs/调试与排障.md) |
-| `tools/` | `nanoammeter_capture.py` 采集脚本 + `uart_flash.py` 串口烧录器 + SWD 调试 TCL 脚本 |
+| `tools/` | `nanoammeter_capture.py` 采集脚本 + `test_capture.py` 其离线回归测试 + `uart_flash.py` 串口烧录器 + SWD 调试 TCL 脚本 |
+
+### 采集脚本（`tools/nanoammeter_capture.py`）
+
+一次运行 = 一次测量，自动落盘 `raw_<MM_DD>_<值>nA.npz` + 同名 `.png` + `.log`（固件说过的每一行 ASCII 原样留档）。连测三个电流就跑三次，得到三份可直接并排比对的图。
+
+```bash
+python tools/nanoammeter_capture.py COM7              # 完整流程 (~65 s)
+python tools/nanoammeter_capture.py COM7 --no-noise   # 跳过底噪 N/W (~15 s)
+python tools/nanoammeter_capture.py --replot [FILE]   # 不接板子，重画已有的 npz
+```
+
+**`--no-noise` 是给 `physics_exp_test` 用的。** 该工程已删除底噪指令（见其 README「两个工程的分工」），不加这个开关脚本会在第 7 步干等 90 秒后抛 `TimeoutError`，而 `np.savez` 在那之后 —— **一个文件都写不出来**。
+
+脚本认得两代结果行：`nano_ammeter` 的 `I=… nA MODE=n`，和 `physics_exp_test` 的 `I=… X=… MODE=n T=…ms [CAL=…]`。后者在 `I=` 与 `MODE=` 之间插了 `X=` 字段，解析正则必须留出那一段，否则文件名会静默退化成 `raw_MM_DD_NO_RESULT.npz`。这条有回归测试兜着：
+
+```bash
+python tools/test_capture.py     # 20 项，纯离线，不碰串口
+```
 
 ### 分工：页面只采集与显示，分析交给 MATLAB / Origin
 
