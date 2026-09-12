@@ -31,6 +31,7 @@ static double mean_code, std_code, slope_code_per_s;
 
 /* 轮间统计 (跨轮累加, 不清零) */
 static uint32_t round_count;
+static uint32_t last_progress_sec;
 static double   sum_means, sumsq_means;
 static double   cum_zero_code, cum_noise_code;
 
@@ -63,6 +64,22 @@ static void CalZero_Cumulative(void)
     cum_zero_code = sum_means / n;
     var = sumsq_means / n - cum_zero_code * cum_zero_code;
     cum_noise_code = (var > 0.0) ? sqrt(var) : 0.0;
+}
+
+/* 进度行: 每 10 秒一行, 让 100 秒的单轮看得见在跑 */
+static void CalZero_Progress(void)
+{
+    char buf[128];
+    char v_adc[16];
+    uint8_t railed = (zmax_code >= 0xFF00U || zmin_code <= 0x00FFU) ? 1U : 0U;
+
+    UART_FormatScaled((int64_t)(mean_code * (3.3 / 65536.0) * 1e4), 4, v_adc);
+    sprintf(buf, "CAL ZERO t=%lu/%lus: MEAN=%lu Vadc=%sV CODE=%u..%u%s\r\n",
+            (unsigned long)(tick_count / 6250U), (unsigned)CAL_ZERO_SECONDS,
+            (unsigned long)(mean_code + 0.5), v_adc,
+            (unsigned)zmin_code, (unsigned)zmax_code,
+            railed ? " RAILED(已撞轨, 后段无效)" : "");
+    UART_SendString(buf);
 }
 
 /* 单轮码 -> fA: 1 码 = 152.6uV(积分器域) -> 10 秒积分折合 1.526 fA */
@@ -136,6 +153,7 @@ void CalMode_Start(void)
     cal_done = 0U;
     zmin_code = 0xFFFFU;
     zmax_code = 0U;
+    last_progress_sec = 0U;
 
     if (round_count == 0U)          /* 只在本轮序列的最开头清零一次 */
     {
@@ -169,6 +187,14 @@ void CalMode_Tick(void)
     if (raw < zmin_code) { zmin_code = raw; }
     if (raw > zmax_code) { zmax_code = raw; }
     tick_count++;
+
+    /* 每 10 秒报一次进度 */
+    if ((tick_count / 6250U) >= (last_progress_sec + 10U))
+    {
+        last_progress_sec = tick_count / 6250U;
+        CalZero_Compute();
+        CalZero_Progress();
+    }
 
     if (tick_count >= CAL_ZERO_TICKS)
     {

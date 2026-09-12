@@ -35,6 +35,7 @@
 #define BUTTON_DISABLED
 static uint8_t noise_mode_active = 0;
 static uint8_t has_result = 0;
+const char *clock_source_name = "?";   /* 实际用上的时钟源, READY 行报出来 */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -230,7 +231,11 @@ int main(void)
   }
 #else
   OLED_DrawScreen("+0.000", "nA", "MODE:IDLE");
-  UART_SendString("NANO-AMMETER READY\r\n");
+  {
+  char buf[80];
+  sprintf(buf, "NANO-AMMETER READY (%s)\r\n", clock_source_name);
+  UART_SendString(buf);
+}
 #endif
   /* USER CODE END 2 */
 
@@ -340,20 +345,44 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
-  RCC_OscInitStruct.MSIState = RCC_MSI_ON;
-  RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_11;   /* 48 MHz */
-  RCC_OscInitStruct.MSICalibrationValue = RCC_MSICALIBRATION_DEFAULT;
+  /** 时钟源: HSE 8MHz 晶振 -> PLL -> SYSCLK 80MHz
+  * 2026-09-12 实测本板 HSE 起振正常 (RCC_CR.HSERDY 置位, 示波器 7.999989MHz)。
+  *   8MHz / M(2) = 4MHz VCO 输入;  x N(40) = 160MHz VCO;  / R(2) = 80MHz
+  *
+  * **PLLM 不能取 1**: 实测 HSE 8MHz + PLLM=1/N=20 会 INVSTATE HardFault
+  * (VCO 输入 8MHz 在规格内、ST 文档无禁止条款, 但实测就是崩)。
+  * 换 PLLM=2/N=40 (VCO 输入 4MHz, 输出同样 160MHz/80MHz) 就正常。
+  *
+  * HSE 起不来就退回 MSI (48/6 x20 /2 = 80MHz), **不要直接 Error_Handler** ——
+  * 那样整机卡死, 连串口都没了没法诊断。用哪个源会在 READY 行报出来。
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_MSI;
-  RCC_OscInitStruct.PLL.PLLM = 6;
-  RCC_OscInitStruct.PLL.PLLN = 20;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 2;
+  RCC_OscInitStruct.PLL.PLLN = 40;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV7;
   RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
   RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
+
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
-    Error_Handler();
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
+    RCC_OscInitStruct.MSIState = RCC_MSI_ON;
+    RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_11;   /* 48 MHz */
+    RCC_OscInitStruct.MSICalibrationValue = RCC_MSICALIBRATION_DEFAULT;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_MSI;
+    RCC_OscInitStruct.PLL.PLLM = 6;
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+    {
+      Error_Handler();              /* 连 MSI 都不行: 真没救了 */
+    }
+    clock_source_name = "MSI 48MHz (HSE 起振失败, 已退回)";
+  }
+  else
+  {
+    clock_source_name = "HSE 8MHz";
   }
 
   /** Initializes the CPU, AHB and APB buses clocks

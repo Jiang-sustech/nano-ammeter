@@ -293,6 +293,15 @@ int main(void)
         if (cmd == 'K') { Cal_HandleSetLine(line); cmd = 0x00; }
         else if (cmd == 'C') { Cal_Report(); cmd = 0x00; }
         else if (cmd == 'Z') { Cal_Clear(); cmd = 0x00; }
+        /* 参考电流极性手控 (调试用): 短接积分节点后量参考电阻压降。
+         * 不受 ADC 判决影响 —— CAL_BANG 的交替靠阈值触发, 节点短接后
+         * ADC 恒定在零位码、不跨阈值, 会卡在最后那个极性上不切换。 */
+        else if (cmd == 'P') { ADG_Enable(); ADG_Select_Positive();
+                               UART_SendString("REF +5V ON\r\n"); cmd = 0x00; }
+        else if (cmd == 'N') { ADG_Enable(); ADG_Select_Negative();
+                               UART_SendString("REF -5V ON\r\n"); cmd = 0x00; }
+        else if (cmd == 'O') { ADG_Disable();
+                               UART_SendString("REF OFF\r\n"); cmd = 0x00; }
       }
       switch (cmd)
       {
