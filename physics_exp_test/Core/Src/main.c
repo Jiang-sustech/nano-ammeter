@@ -308,8 +308,14 @@ int main(void)
     {
       /* 串口指令: S=单次测量   D=查询结果
        *           B=内置 ADC 波形  X=ADS8866 波形  E=观测通路自检
-       * 参数化指令 (整行): C=查询校准系数  K<段>,<a_ppm>,<b_fA>=写入  Z=清除
-       *                   T<秒>=小电流模式积分时长 */
+       * 参数化指令 (整行):
+       *   C                    查询分段系数 a/b
+       *   K<段>,<a_ppm>,<b_fA> 写入分段系数        Z 清除分段系数
+       *   Q                    查询物理常数 q/I+/I-
+       *   Q<q_aC>,<i+_pA>,<i-_pA>  写入物理常数
+       *   T<秒>                小电流模式积分时长 */
+      /* 物理常数与分段系数分成两组指令: 前者是仪器的实测属性, 后者是拟合出来的
+       * 修正; 混在一起会让人以为 Z 会把标定好的 q 一起清掉 */
       /* 整行接收: 参数化指令 (K/C/Z) 需要整行; 单字符指令走同一个缓冲,
        * 长度 1 的行就是简单指令 */
       char line[UART_LINE_MAX];
@@ -321,6 +327,13 @@ int main(void)
         if (cmd == 'K') { Cal_HandleSetLine(line); cmd = 0x00; }
         else if (cmd == 'C') { Cal_Report(); cmd = 0x00; }
         else if (cmd == 'Z') { Cal_Clear(); cmd = 0x00; }
+        else if (cmd == 'Q')
+        {
+          /* 裸 Q = 查询, 带参数 = 写入 */
+          if (line[1] == '\0') { Cal_ReportPhys(); }
+          else                 { Cal_HandlePhysLine(line); }
+          cmd = 0x00;
+        }
       }
       switch (cmd)
       {

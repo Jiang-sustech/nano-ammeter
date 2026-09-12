@@ -4,6 +4,7 @@
 #include "adg4530.h"
 #include "tim.h"
 #include "cal_mode.h"
+#include "cal_coef.h"   /* Cal_GetQ / Cal_GetIPos / Cal_GetINeg: 可标定的物理常数 */
 #include <math.h>
 
 /* ---- 硬件常量 (C_INT/I_POS_REF/I_NEG_REF 已上移到 current.h 供标定模块共用) ---- */
@@ -36,16 +37,49 @@ static uint32_t ext_bad_read;               /* 坏读累计 (跨窗口只增不�
 
 /* 同拍读两路: 返回内置(控制), 经 *ext_out 带出外部(观测)。
  * 顺序固定为先内后外 —— 控制判决必须基于本 tick 最早那一刻的电平,
- * 外部读取的 ~11us 不能挤进判决路径。 */
+ * 外部读取的 ~11us 不能挤进判决路径。
+ *
+ * ---- 坏读判据 (为什么不在驱动层判) ----
+ * 0xFFFF 既是"DOUT 常高 / MISO 断线"的特征, **也是合法的满量程码**。
+ * 只按外部值判, 输入撞轨时会把 100% 的有效读数记成坏读 —— 实测底噪那一轮
+ * ERR 从 37 虚涨到 312537 (= 37 + 50s x 6250, 精确吻合), 37 个误报全是
+ * 0xFFFF、0x0000 一个都没有。诊断计数一旦这样撒谎, 所有人都会去查一个
+ * 不存在的硬件故障。
+ *
+ * 所以判据上移到能同时看到两路的地方:
+ *   外部满量程 且 内置也压轨   -> 真撞轨, 不计数
+ *   外部满量程 而 内置在量程中段 -> MISO 真断, 计数
+ *   外部 0x0000                -> 计数 (本硬件正轨映射到码 ~1290, 模式一
+ *                                 实测最低 2288, 节点根本到不了 0V, 无歧义)
+ *
+ * 残留误判已界定: 两路 11us 采样偏斜在斜坡上只差约 160 码, 而外部满量程
+ * 对应内置码 >= 64800、判据取 61440, 裕度 3360 码 >> 160 码。真断线叠真撞轨
+ * 时会漏报, 但那时读数本就无效且不影响控制路径。
+ * **这个判据只影响 ERR 这个诊断计数, 永远不影响测量数值。** */
+#define RAIL_DETECT_CODE  0xF000U       /* 内置压轨判据 (满轨实测 0xFFF0) */
+
 static uint16_t ReadBoth(uint16_t *ext_out)
 {
     uint16_t r_int = Adc_ReadRaw();
     uint16_t r_ext = ADS8866_ReadRaw();
+    uint8_t  ext_full = (uint8_t)((r_ext == 0xFFFFU) || (r_ext == 0x0000U));
 
-    if ((r_ext == 0x0000U) || (r_ext == 0xFFFFU))
+    if (ext_full)
     {
-        ext_bad_read++;
+        /* 内置也在轨上 -> 节点真的撞轨了, 外部读数是对的, 不算坏读 */
+        uint8_t int_railed = (uint8_t)((r_int >= RAIL_DETECT_CODE) ||
+                                       (r_int <= (uint16_t)(0xFFFFU - RAIL_DETECT_CODE)));
+        /* 0x0000 无歧义: 正轨映射到码 ~1290, 节点到不了 0V, 一定是链路故障 */
+        if ((r_ext != 0x0000U) && int_railed)
+        {
+            /* 真撞轨: 不计数 */
+        }
+        else
+        {
+            ext_bad_read++;
+        }
     }
+
     *ext_out = r_ext;
     return r_int;
 }
@@ -64,7 +98,9 @@ static volatile uint8_t sel_state;
 #define SI_TICKS_PER_SEC   6250U        /* TIM6 160us -> 1s */
 #define SI_DEFAULT_SEC     3U
 #define SI_MAX_SEC         30U
-#define SI_RAIL_V          3.5f         /* |dV| 到这儿就提前收尾 (轨在 4.3V) */
+#define SI_RAIL_CODE       22900U       /* |Δ码| 到这儿就提前收尾 (= 3.5V,
+                                         * 按标称映射 1码=152.6uV; 轨在 4.3V)。
+                                         * 这是安全限, 不参与精度, 标称换算无妨 */
 #define SI_SETTLE_TICKS    8U           /* 断开参考后注入台阶的稳定拍数 */
 #define SI_AVG_TICKS       8U           /* 起点/终点各取多少拍平均 */
 
@@ -74,7 +110,10 @@ static volatile uint8_t  si_short;      /* 撞轨提前收尾 (结果仍有效, 
 static volatile uint32_t si_ticks;
 static uint32_t          si_target_ticks = SI_DEFAULT_SEC * SI_TICKS_PER_SEC;
 static uint32_t          si_decim;      /* 抽点存波形的间隔 */
-static float             si_start_int, si_start_ext;    /* 起点 (积分器域 V) */
+/* 起点/终点都存**原始码的平均**, 不存电压: 码域直接乘 q 就行, 不必过
+ * LEVELSHIFT_GAIN。而 (V_ADC_ZERO - v) 那两项在相减时本来就会约掉 ——
+ * 存电压等于白白把两个标称常量引进计算链 */
+static float             si_start_int, si_start_ext;    /* 起点 (平均原始码) */
 static float             si_cur_int,  si_cur_ext;       /* 结果 (A) */
 static uint16_t          si_ring_int[SI_AVG_TICKS];
 static uint16_t          si_ring_ext[SI_AVG_TICKS];
@@ -100,16 +139,9 @@ static uint16_t VToCode(float v_adc)
     return (uint16_t)(v_adc / ADS8866_VREF * 65536.0f);
 }
 
-/* ADS8866 原始码 -> 积分器电压 (反相映射) */
-static float CodeToVInt(uint16_t code)
-{
-    float v_adc = (float)code * ADS8866_VREF / 65536.0f;
-    return (LEVELSHIFT_V_ADC_ZERO - v_adc) / LEVELSHIFT_GAIN;
-}
-
-/* 上升过阈时刻线性插值 (prev < th <= now), 返回以秒为单位 */
-
-/* 下降过阈时刻线性插值 (prev > th >= now) */
+/* 注: 原来这里有个 CodeToVInt() (原始码 -> 积分器电压)。现在模式一和小电流
+ * 模式都在**码域**直接乘 q 算, 不再需要它 —— 那正是为了甩掉 LEVELSHIFT_GAIN
+ * 这个从没测过的标称值 (它在端点差里本来就会约掉, 换算成电压是白引入一次除法) */
 
 /* 由电平移位映射计算 ADC 域阈值码 */
 static void ThresholdCodes_Init(void)
@@ -123,12 +155,12 @@ static void ThresholdCodes_Init(void)
  * 模式一: 滞回电荷平衡 (1 秒窗口)
  * ============================================================ */
 /* 拉回相守卫: 每次 Adc_ReadRaw() 约 8us (ADC 时钟 80MHz, 采样 640.5 周期),
- * 50000 次约 400ms。两段各一次, 合计最坏约 800ms。
+ * 50000 次约 400ms。
  *
- * 量级参考 (C=100pF, |I_ref|=50nA, 满摆幅 8.6V, 拉回速率 = 净电流/C):
- *   输入 25nA -> 净 25nA -> 250V/s -> 约 35ms
- *   输入 45nA -> 净  5nA ->  50V/s -> 约 175ms   <- 用户预留 10% 余量的边缘
- * 即 400ms 在预留余量内够用, 但绝不是"10 倍裕量"。
+ * 量级参考 (C=100pF, |I_ref|=50nA, 拉回速率 = 净电流/C):
+ *   最坏行程 5.3V (电平移位饱和轨 -> 0V), 输入 0     -> 500V/s  -> 约 11ms
+ *   输入 45nA 与参考相抵                            ->  50V/s  -> 约 106ms
+ * 即 400ms 对最坏情况有约 4 倍余量。
  * 再往外就只是防挂死保险丝, 不是量程判据 (超量程由用户保证不会发生) */
 #define PRECOND_GUARD  50000U
 
@@ -155,7 +187,7 @@ void Current_Start(void)
 
     ADG_Enable();
 
-    /* ---- 拉回相 (阻塞): 把积分器从任意初始状态拉到固定的相边界 ----
+    /* ---- 拉回相 (阻塞): 把积分器拉到接近 0V ----
      * 必须在调用方 HAL_TIM_Base_Start_IT 之前完成 —— 此刻 TIM6 未跑,
      * ISR 不参与, 所以这里可以安全地阻塞轮询 Adc_ReadRaw()
      * (Adc_ReadRaw 不可重入, 不能与 ISR 里的转换并发)。
@@ -166,43 +198,47 @@ void Current_Start(void)
      * C*(Vo1-Vo2)/(N*T) 项随之失效 -> 结果带固定偏置
      * (实测两次逐位相同的 25.274nA, 说明它是偏置而不是噪声)。
      *
-     * 目标: 起点固定在上阈值 (V_o = -4.3V, 摆幅下限), 开窗即完整 NEG 相。
-     * 这样两次测量的 6250 点可以逐点对齐。 */
+     * ---- 为什么目标是 0V 而不是某个阈值 ----
+     * 1) 拉到边界是**赌符号**: 拉到 -4.3V 后若被测电流把它往更负推, 余量
+     *    就是 0, 第一拍立刻撞轨 (底噪那一轮 100% 满量程就是这么来的)。
+     *    拉到 0V 则两个方向各留 4.3V, 不需要预知电流符号。
+     * 2) 恰好停在阈值上开窗, 第一拍立即触发切换, 那个相位退化成 1 拍
+     *    (旧记录里见过"第一个 NEG 相 285 拍 / 稳态 36.5 拍"这种畸变)。
+     *    停在 0V 则第一个相位是正常长度。
+     * 3) 0V 是电平移位器最线性的点。
+     * 代价: 两次测量的 6250 点不再逐点相位对齐。那只影响波形叠图比对,
+     * 不影响电流值 —— 式(6) 用的是实测的 Vo1/Vo2。 */
     raw = Adc_ReadRaw();
+    guard = PRECOND_GUARD;
 
-    if (raw > code_upper)       /* 已越过/压在上阈值之外 (典型: 压在下轨) */
+    if (raw > code_zero)                    /* 典型: 压在下轨 (raw 满量程) */
     {
-        /* 第一段是必需的: 起点在下轨时直接选 POS 只会把它压得更深,
-         * 永远到不了上阈值, 必须先反向拉回线性区 */
-        guard = PRECOND_GUARD;
+        sel_state = SEL_NEG;
         ADG_Select_Negative();              /* V_o 上抬 -> raw 下降 */
-        while ((raw > code_lower) && (guard != 0U))
+        while ((raw > code_zero) && (guard != 0U))
         {
             raw = Adc_ReadRaw();
             guard--;
         }
-        if (guard == 0U)
+    }
+    else
+    {
+        sel_state = SEL_POS;
+        ADG_Select_Positive();              /* V_o 下压 -> raw 上升 */
+        while ((raw < code_zero) && (guard != 0U))
         {
-            precond_timeout++;
+            raw = Adc_ReadRaw();
+            guard--;
         }
     }
 
-    /* 第二段 (恒定执行): 由斜坡拉到上阈值。守卫超时也照常开窗 ——
-     * 不新增超量程上报路径 (输入可控), 这里只作防挂死保险丝 */
-    guard = PRECOND_GUARD;
-    ADG_Select_Positive();                  /* V_o 下压 -> raw 上升 */
-    while ((raw < code_upper) && (guard != 0U))
-    {
-        raw = Adc_ReadRaw();
-        guard--;
-    }
+    /* 守卫超时也照常开窗 —— 不新增超量程上报路径 (输入可控), 这里只作
+     * 防挂死保险丝。最坏行程 5.3V: 45nA 输入与参考相抵时净 5nA -> 50V/s
+     * -> 106ms, 而 PRECOND_GUARD 约 400ms, 4 倍余量 */
     if (guard == 0U)
     {
         precond_timeout++;
     }
-
-    sel_state = SEL_NEG;                    /* 窗口以完整 NEG 相开始 */
-    ADG_Select_Negative();
 }
 
 /* 停止测量: 停 TIM6 + 关断 ADG (空闲状态不注入参考电流) */
@@ -288,7 +324,7 @@ void Current_Process(void)
  * 左移 4 位、等效 16 码), 内置那路作为对照。 */
 float Calculate_Current_From(const uint16_t *buf)
 {
-    float vo1, vo2, n_total;
+    float n_total, dc;
     uint32_t m_span, n_span;
 
     if (sample_index == 0U)
@@ -303,12 +339,17 @@ float Calculate_Current_From(const uint16_t *buf)
     m_span = m_count;
     n_span = n_count - 1U;
 
-    vo1 = CodeToVInt(buf[0]);
-    vo2 = CodeToVInt(buf[sample_index - 1U]);
+    /* 端点项直接在码域算。推导:
+     *   Vo = (V_ADC_ZERO - c·VREF/65536)/GAIN
+     *   Vo1 - Vo2 = (c2 - c1)·VREF/(65536·GAIN)     <- V_ADC_ZERO 在这里约掉了
+     *   C·(Vo1 - Vo2) = [C·VREF/(65536·GAIN)]·(c2 - c1) = q·(c2 - c1)
+     * 于是省掉一次除法和 V_ADC_ZERO, 而且 q 是可标定量 (cal_coef), 不再依赖
+     * C / VREF / GAIN 三个从没测过的标称值 */
+    dc = (float)buf[sample_index - 1U] - (float)buf[0];
 
     n_total = (float)(m_span + n_span);
-    n_total = C_INT * (vo1 - vo2) / (n_total * T_INT)
-              - ((float)m_span * I_POS + (float)n_span * I_NEG) / n_total;
+    n_total = Cal_GetQ() * dc / (n_total * T_INT)
+              - ((float)m_span * Cal_GetIPos() + (float)n_span * Cal_GetINeg()) / n_total;
 
     return n_total;
 }
@@ -460,7 +501,7 @@ float Current_GetSwingVoltage(void)
  * 而小电流根本不需要参考电流把它拉回来: 1 pA 积 3 秒才 30mV, 离 ±4.3V
  * 的轨远得很, 直接积、测首尾两点即可。
  *
- *   I = C * (V_start - V_end) / T
+ *   I = C * (V_start - V_end) / T  =  q * (码_start - 码_end) / T
  *
  * 符号与模式一同一约定 (与 I_POS 同号为正): I_POS 使 V_int 下降、原始码
  * 上升, 所以正电流 -> 码上升 -> V_start > V_end -> I > 0。
@@ -489,8 +530,8 @@ static void SmallI_Finish(void)
 
     for (k = 0U; k < si_ring_n; k++)
     {
-        sum_i += CodeToVInt(si_ring_int[k]);
-        sum_e += CodeToVInt(si_ring_ext[k]);
+        sum_i += (float)si_ring_int[k];     /* 码域, 见 si_start_int 的注释 */
+        sum_e += (float)si_ring_ext[k];
     }
     if (si_ring_n > 0U)
     {
@@ -498,11 +539,12 @@ static void SmallI_Finish(void)
         sum_e /= (float)si_ring_n;
     }
 
+    /* I = C·(V_start - V_end)/T = q·(码_start - 码_end)/T */
     t_s = (float)si_ticks * T_INT;
     if (t_s > 0.0f)
     {
-        si_cur_int = C_INT * (si_start_int - sum_i) / t_s;
-        si_cur_ext = C_INT * (si_start_ext - sum_e) / t_s;
+        si_cur_int = Cal_GetQ() * (si_start_int - sum_i) / t_s;
+        si_cur_ext = Cal_GetQ() * (si_start_ext - sum_e) / t_s;
     }
 
     window_current     = si_cur_int;
@@ -538,9 +580,9 @@ static void SmallI_Tick(uint16_t raw, uint16_t raw_ext)
         sample_index++;
     }
 
-    d = CodeToVInt(raw) - si_start_int;
+    d = (float)raw - si_start_int;
     if (d < 0.0f) { d = -d; }
-    if (d >= SI_RAIL_V)
+    if (d >= (float)SI_RAIL_CODE)
     {
         si_short = 1U;                      /* 电流比预期大: 提前收尾, 用实际 T */
         SmallI_Finish();
@@ -568,14 +610,14 @@ void Current_PullToZero(void)
 
     if (raw > code_zero)
     {
-        guard = HARD_RESET_GUARD;
+        guard = PULLZERO_GUARD;
         ADG_Enable();
         ADG_Select_Negative();
         while ((raw > code_zero) && (guard != 0U)) { raw = Adc_ReadRaw(); guard--; }
     }
     else if (raw < code_zero)
     {
-        guard = HARD_RESET_GUARD;
+        guard = PULLZERO_GUARD;
         ADG_Enable();
         ADG_Select_Positive();
         while ((raw < code_zero) && (guard != 0U)) { raw = Adc_ReadRaw(); guard--; }
@@ -599,8 +641,8 @@ void SmallI_Start(void)
     for (i = 0U; i < SI_SETTLE_TICKS; i++)
     {
         raw = ReadBoth(&ext);
-        sum_i += CodeToVInt(raw);
-        sum_e += CodeToVInt(ext);
+        sum_i += (float)raw;                /* 码域, 见 si_start_int 的注释 */
+        sum_e += (float)ext;
     }
     si_start_int = sum_i / (float)SI_SETTLE_TICKS;
     si_start_ext = sum_e / (float)SI_SETTLE_TICKS;

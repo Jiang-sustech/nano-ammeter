@@ -56,7 +56,6 @@ static void DWT_DelayUs(uint32_t us)
 volatile uint32_t ads_spi_txe_timeout;
 volatile uint32_t ads_spi_rxne_timeout;
 volatile uint32_t ads_spi_bsy_timeout;
-volatile uint32_t ads_bad_read;
 
 /* ------------------------------------------------------------
  * 16 位全双工传输, DIN 恒高 (3 线 CS 模式的前提)
@@ -150,7 +149,7 @@ void ADS8866_Init(void)
      * 之前 DIN 是低电平, 若此时就发 CONVST, 芯片会进菊花链模式。
      * 这里只走底层传输而不调 ADS8866_ReadRaw(): 此刻还没有有效转换
      * (CONVST 从未拉高), 读回来必然是 0x0000/0xFFFF 之类的无效码,
-     * 调 ReadRaw 会平白给 ads_bad_read 记上一笔假故障 */
+     * 调 ReadRaw 会平白让调用方记上一笔假故障 */
     (void)SPI1_Xfer16();
 }
 
@@ -171,14 +170,13 @@ uint16_t ADS8866_ReadRaw(void)
     /* 4) 16 个 SCLK 读出 16 位 */
     raw = SPI1_Xfer16();
 
-    /* 5) 坏读检测: 0x0000 (转换未完成/DOUT 恒低) 与 0xFFFF (DOUT 常高,
-     *    典型原因 MISO 断线 / DOUT 未使能 / OE 悬空) 都不是有效转换结果。
-     *    仍然原样返回读到的码 —— 调用方需要看到真实原始值来判断故障
-     *    类型, 替它改成漂亮值反而藏起了问题 */
-    if ((raw == 0x0000U) || (raw == 0xFFFFU))
-    {
-        ads_bad_read++;
-    }
+    /* 5) 原样返回读到的码 —— 调用方需要看到真实原始值来判断故障类型,
+     *    替它改成漂亮值反而藏起了问题。
+     *
+     *    **这里不判坏读。** 0xFFFF 既是"MISO 断线 / DOUT 常高"的特征,
+     *    也是合法的满量程码; 只看这一路分不开, 输入撞轨时会把 100% 的有效
+     *    读数记成坏读 (实测 ERR 虚涨到 312537)。判据上移到 current.c 的
+     *    ReadBoth() —— 那里同时看得到内置那一路, 才能区分"真撞轨"和"真断线" */
 
     /* 6) tacq >= 1.2us 与 tcyc >= 10us 由调用方的采样节奏天然满足 */
 

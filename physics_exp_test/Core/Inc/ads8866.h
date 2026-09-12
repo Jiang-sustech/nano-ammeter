@@ -42,7 +42,11 @@ void     ADS8866_Init(void);
 
 /* 读一次转换结果 (阻塞, 单次约 10us)
  * 返回 16 位原始码 0~65535, 对应 0~VREF。
- * 读到 0x0000 / 0xFFFF 时 ads_bad_read 自增, 但函数仍返回真实码 */
+ *
+ * **原样返回, 不在这里判坏读**: 0xFFFF 既是"MISO 断线"的特征, 也是合法的
+ * 满量程码, 只看这一路分不开"真撞轨"和"真断线"(输入撞轨时会把 100% 的
+ * 有效读数判成坏读)。判据在 current.c 的 ReadBoth() —— 那里能同时看到
+ * 内置那一路 */
 uint16_t ADS8866_ReadRaw(void);
 
 /* 读一次并换算为电压, vref 单位 V */
@@ -52,6 +56,7 @@ float    ADS8866_ReadVoltage(float vref);
 extern volatile uint32_t ads_spi_txe_timeout;   /* 等 TXE 超时次数 */
 extern volatile uint32_t ads_spi_rxne_timeout;  /* 等 RXNE 超时次数 */
 extern volatile uint32_t ads_spi_bsy_timeout;   /* 等 BSY 落超时次数 */
-extern volatile uint32_t ads_bad_read;          /* 坏码 (0x0000/0xFFFF) 次数 */
+/* 坏读计数不在这里 —— 见 current.c 的 ReadBoth(): 要同时看到两路才能区分
+ * "真撞轨"和"真断线", 驱动层只有外部那一路的读数, 判不了 */
 
 #endif /* ADS8866_H */

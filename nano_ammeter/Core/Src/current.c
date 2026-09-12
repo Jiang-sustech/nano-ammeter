@@ -50,15 +50,45 @@ static uint32_t trace_count;
 /* 同拍读两路: 返回内置(控制), 经 *ext_out 带出外部(观测)。
  * 顺序固定为先内后外 —— 控制判决必须基于本 tick 最早那一刻的电平,
  * 外部读取的 ~11us 不能挤进判决路径。 */
+/* ---- 坏读判据 (为什么不在驱动层判) ----
+ * 0xFFFF 既是"DOUT 常高 / MISO 断线"的特征, **也是合法的满量程码**。
+ * 只按外部值判, 输入撞轨时会把 100% 的有效读数记成坏读 —— 实测底噪那一轮
+ * ERR 从 37 虚涨到 312537 (= 37 + 50s x 6250, 精确吻合), 37 个误报全是
+ * 0xFFFF、0x0000 一个都没有。诊断计数一旦这样撒谎, 所有人都会去查一个
+ * 不存在的硬件故障。
+ *
+ * 所以判据上移到能同时看到两路的地方:
+ *   外部满量程 且 内置也压轨   -> 真撞轨, 不计数
+ *   外部满量程 而 内置在量程中段 -> MISO 真断, 计数
+ *   外部 0x0000                -> 计数 (本硬件正轨映射到码 ~1290, 模式一
+ *                                 实测最低 2288, 节点根本到不了 0V, 无歧义)
+ *
+ * 残留误判已界定: 两路 11us 采样偏斜在斜坡上只差约 160 码, 而外部满量程
+ * 对应内置码 >= 64800、判据取 61440, 裕度 3360 码 >> 160 码。真断线叠真撞轨
+ * 时会漏报, 但那时读数本就无效且不影响控制路径。
+ * **这个判据只影响 ERR 这个诊断计数, 永远不影响测量数值。** */
+#define RAIL_DETECT_CODE  0xF000U       /* 内置压轨判据 (满轨实测 0xFFF0) */
+
 static uint16_t ReadBoth(uint16_t *ext_out)
 {
     uint16_t r_int = Adc_ReadRaw();
     uint16_t r_ext = ADS8866_ReadRaw();
+    uint8_t  ext_full = (uint8_t)((r_ext == 0xFFFFU) || (r_ext == 0x0000U));
 
-    if ((r_ext == 0x0000U) || (r_ext == 0xFFFFU))
+    if (ext_full)
     {
-        ext_bad_read++;
+        uint8_t int_railed = (uint8_t)((r_int >= RAIL_DETECT_CODE) ||
+                                       (r_int <= (uint16_t)(0xFFFFU - RAIL_DETECT_CODE)));
+        if ((r_ext != 0x0000U) && int_railed)
+        {
+            /* 真撞轨: 不计数 */
+        }
+        else
+        {
+            ext_bad_read++;
+        }
     }
+
     *ext_out = r_ext;
     return r_int;
 }
@@ -791,9 +821,50 @@ static void Noise_Fit(void)
     noise_bias_current = (float)((double)C_INT * dv_dt);
 }
 
+/* 把积分器拉到零位 (阻塞)。
+ *
+ * 为什么每个长积分测量都得先复位: 空闲态 ADG 断开, 积分器被被测电流一直
+ * 推着走。不复位就开始积分, 起点可能在轨上 —— 压轨后若电流还在往同一方向
+ * 推, 整轮就贴在轨上不动, 斜率恒为 0, 那 0 是"没采到数据"而不是"偏置为零"。
+ *
+ * 为什么目标是 0V 而不是某个阈值: 拉到边界是**赌电流符号**, 赌错那一侧
+ * 余量为 0、第一拍就撞轨; 拉到 0V 则两个方向各留 4.3V (按 1pA 算能积 430 秒)。
+ *
+ * 注: HardIntegral_Start() 的复位相是同一件事, 但那边要接着做上积, 结束时
+ * 必须保持 ADG 接通并选好极性, 所以没有共用 —— 改动时留意两处保持一致。 */
+void Current_PullToZero(void)
+{
+    uint16_t raw = Adc_ReadRaw();
+    uint32_t guard;
+
+    ThresholdCodes_Init();
+
+    if (raw > code_zero)
+    {
+        guard = PULLZERO_GUARD;
+        ADG_Enable();
+        ADG_Select_Negative();
+        while ((raw > code_zero) && (guard != 0U)) { raw = Adc_ReadRaw(); guard--; }
+    }
+    else if (raw < code_zero)
+    {
+        guard = PULLZERO_GUARD;
+        ADG_Enable();
+        ADG_Select_Positive();
+        while ((raw < code_zero) && (guard != 0U)) { raw = Adc_ReadRaw(); guard--; }
+    }
+    ADG_Disable();                          /* 断开参考: 只让被测电流积分 */
+}
+
 void Noise_Start(void)
 {
-    ADG_Disable();              /* 所有输入关闭, 无参考注入 */
+    /* ---- 先复位到接近 0V (阻塞, 内部结束时已 ADG_Disable), 再开纯积分 ----
+     * 不复位的话积分器从上次停下的位置开始, 多半已压轨; 压轨后若被测电流
+     * 还在往同一方向推, 整轮就贴在轨上不动, 斜率恒为 0、数据全废 ——
+     * 实测底噪那一轮 100% 读数满量程, 就是这么来的。
+     * 拉到 0V 后两个方向各留 4.3V (按 1pA 算能积 430 秒), 50 秒的跑法绰绰有余。
+     * 必须在 TIM6 未跑时做: Adc_ReadRaw 不可重入, 不能与 ISR 里的转换并发。 */
+    Current_PullToZero();
 
     noise_active = 1U;
     noise_done = 0U;
