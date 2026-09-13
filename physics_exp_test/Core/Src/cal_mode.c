@@ -178,7 +178,8 @@ void CalMode_Start(void)
 void CalMode_Tick(void)
 {
 #if CAL_MODE == CAL_ZERO
-    uint16_t raw = Adc_ReadRaw();       /* 控制通路; 零位检查不加观测扰动 */
+    /* 走 Current_ReadControl(): 随 USE_INTERNAL_ADC 一起切, 不写死内置路 */
+    uint16_t raw = Current_ReadControl();
     double t = (double)tick_count / 6250.0;      /* 秒 */
 
     sum_t  += t;

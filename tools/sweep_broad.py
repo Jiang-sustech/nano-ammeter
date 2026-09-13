@@ -162,9 +162,17 @@ def main():
     lines.append("    K 明显非 0 -> 误差随电流变化, 小电流端更差 (偏向偏移型)")
     lines.append("")
     lines.append("逐点:")
-    lines.append("  %12s %14s %14s %10s %6s" % ("设定(pA)", "真值(nA)", "读数(nA)", "误差%", "MODE"))
-    for pA, x, y, e, m in zip(pts_have, xs, ys, es, modes):
-        lines.append("  %12.4g %14.6f %14.6f %+10.3f %6d" % (pA, x, y, e, m))
+    lines.append("  **两个误差是两回事**: 对回读值 = 准确度; 对拟合直线 = 非线性")
+    lines.append("  %11s %13s %13s %11s %11s %6s"
+                 % ("设定(pA)", "回读(nA)", "读数(nA)", "准确度%", "非线性%", "MODE"))
+    ef = []
+    for x, y in zip(xs, ys):
+        fit = A * x + B
+        ef.append((y - fit) / fit * 100 if fit else float('nan'))
+    for pA, x, y, e, f, m in zip(pts_have, xs, ys, es, ef, modes):
+        lines.append("  %11.4g %13.6f %13.6f %+11.3f %+11.4f %6d" % (pA, x, y, e, f, m))
+    lines.append("  最大 |准确度| = %.3f %%   最大 |非线性| = %.4f %%   <- 通常差 1~2 个数量级"
+                 % (max(abs(v) for v in es), max(abs(v) for v in ef)))
 
     reg_out = a.out.replace('.csv', '_reg.txt')
     with open(reg_out, 'w', encoding='utf-8') as f:
@@ -180,10 +188,13 @@ def main():
     plt.rcParams['axes.unicode_minus'] = False
 
     fig, ax = plt.subplots(1, 2, figsize=(13.5, 5.5))
-    ax[0].semilogx([abs(x) * 1e3 for x in xs], es, 'o-', ms=5)
+    xpA = [abs(x) * 1e3 for x in xs]
+    ax[0].semilogx(xpA, es, 'o-', ms=5, color='C3', label='相对**回读值** (= 准确度)')
+    ax[0].semilogx(xpA, ef, 's--', ms=4, color='C0', label='相对**拟合直线** (= 非线性)')
     ax[0].axhline(0, color='k', ls='--', lw=1)
     ax[0].set_xlabel('电流 (pA)'); ax[0].set_ylabel('相对误差 (%)')
-    ax[0].set_title('误差曲线'); ax[0].grid(alpha=.3, which='both')
+    ax[0].set_title('两条误差曲线 (同一批数据, 两个不同的量)')
+    ax[0].grid(alpha=.3, which='both'); ax[0].legend(fontsize=8)
 
     ax[1].loglog([abs(x) for x in xs], [abs(y) for y in ys], 'o', ms=5, label='读数')
     lim = [min(abs(x) for x in xs), max(abs(x) for x in xs)]

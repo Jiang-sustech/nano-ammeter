@@ -13,6 +13,38 @@
 #define LEVELSHIFT_GAIN        0.33f
 #define LEVELSHIFT_V_ADC_ZERO  1.55f    /* 积分器 0V 对应 ADC 电压 */
 
+/* ============================================================
+ * USE_INTERNAL_ADC —— 内置 ADC (STM32 ADC12) 是否参与
+ * ============================================================
+ * 2026-09-13 用户裁定: "代码应该和内置 ADC 完全无关, 不论是什么状态、
+ * 什么测量模式、什么阶段"。按用户要求做法 —— **内置路的代码保留但停用**;
+ * 所有活跃路径改用外部 ADS8866。测完之后再决定删除还是回滚。
+ *
+ *   1 -> 原状: 控制值/端点/结果都用**内置路**, 外部路只作观测 (X=)
+ *   0 -> 试验: **全部用外部路**; 内置路的读取被 #if 挡掉, 代码保留可查
+ *
+ * **回滚就是把这一个数字改回 1**, 不需要动别处。
+ *
+ * 改 0 之前要知道的四件事:
+ *   ① 标定常数 q / I± **一定会变** —— 换了 ADC, 端点码的尺度与偏置都不同,
+ *      必须重新标定。这是预期内的, 不是故障。
+ *   ② 坏读判据失去"两路交叉" —— 原来靠"外部满量程 **且** 内置也在轨"区分
+ *      "真撞轨"与"MISO 真断线"; 只剩一路就分不清了 (见 ReadBoth 的注释)。
+ *   ③ 外部路的 9us 转换等待是 `DWT_DelayUs` **盲等**。它当观测用时时序不紧张;
+ *      一旦当控制用, 要求完全不同 —— 所以这次必须实测。
+ *   ④ 每拍从 ~19us 降到 ~11us (少读一路), 控制判决点往后挪约 11us。
+ *      理论上均匀偏移、无系统误差, 但没实测过。
+ * ============================================================ */
+#define USE_INTERNAL_ADC   0
+
+/* 试验期专用: 外部读取之前的预延时 (us)。
+ * 目的是把 CONVST 边沿从"紧贴 TIM6 中断入口"推回**原来的时间位置** ——
+ * 原来前面隔着一次内置读取 (实测 8.2us), 现在没有了, CONVST 就落在了
+ * 中断入口附近; 实测后果是 0xFFFF 坏读从每窗 ~0 涨到 ~31 次, 而**首拍
+ * 坏读率 1/6** (比平均高 33 倍)。取 8 是照原来那 8.2us 复原。
+ * 设 0 可以关掉, 用来做对照实验。 */
+#define EXT_PREDELAY_US    20U
+
 /* 硬件常量 (计算与标定模块共用) */
 /* 积分电容: 100pF 为标称值 (用户按丝印确认; 早期 30pF 是错的假设) */
 #define C_INT            100e-12f   /* 积分电容 (F) */
@@ -64,6 +96,9 @@ void Current_Start(void);
 extern volatile uint32_t precond_timeout;
 void Current_Stop(void);               /* 停止: 停 TIM6 + 关 ADG (空闲不注入参考) */
 void Current_Process(void);            /* TIM6 中断每 160us 调用一次 */
+/* 读一次控制值 —— 按 USE_INTERNAL_ADC 决定用内置还是外部路。
+ * 凡是需要"和测量用同一条路"的地方都该用它, 不要直接调 Adc_ReadRaw()。 */
+uint16_t Current_ReadControl(void);
 /* 式(6) —— **全量程唯一的结果计算函数**。
  * 只看窗口的首尾两个码, 分母是 m+n (计数), 所以对 1s 和 10s 窗口同样成立。
  * 端点码由 Current_GetFirstCode()* 与 Current_GetLastCode()* 给。
@@ -92,6 +127,14 @@ uint32_t Current_GetSampleCount(void);      /* 当前窗口已采样数 (B 指�
 uint16_t Current_GetExtSample(uint32_t index);   /* 外部 16 位原始码 */
 uint32_t Current_GetExtSampleCount(void);        /* 与 GetSampleCount 同口径 */
 uint32_t Current_GetExtBadRead(void);            /* 外部 ADC 坏读计数 (0x0000/0xFFFF) */
+
+/* ---- 时序实测 (2026-09-13 加, 由 E 指令回显) ----
+ * 8.2us / 10.6us 原来都是按**配置推算**的, 从没实测。而它直接决定一件事:
+ * ADS8866 的转换时间是不是真的 <= 驱动里 `DWT_DelayUs(9)` 那个**盲等** ——
+ * 不够的话 SPI 读回来的是**上一次的样本**, 一个隐性的滞后一拍。 */
+extern volatile uint32_t t_int_ns;      /* 内置路单次读取耗时 (ns); USE_INTERNAL_ADC=0 时为 0 */
+extern volatile uint32_t t_ext_ns;      /* 外部路单次读取耗时 (ns) */
+extern volatile uint32_t ext_ffff_cnt;  /* 外部路返回 0xFFFF 的累计次数 */
 uint32_t Current_GetMCount(void);           /* 最近完整窗口 POS 周期数 (标定用) */
 uint32_t Current_GetNCount(void);           /* 最近完整窗口 NEG 周期数 (标定用) */
 uint16_t Current_GetMinCode(void);          /* 最近窗口最小码 = 下阈值切换点 (标定用) */

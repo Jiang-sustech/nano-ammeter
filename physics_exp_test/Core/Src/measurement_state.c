@@ -29,6 +29,7 @@ static uint32_t measurement_ticks;          /* 本次窗口的实际拍数 (结�
 static uint8_t result_is_longw;             /* 结果是否来自 10s 长窗口 (结果行 MODE=2) */
 static uint8_t result_is_timeout;
 static uint8_t long_tried;                  /* 本次测量已经换过 10s 窗口 */
+static uint32_t precond_to_at_start;        /* 本次测量开始时的 precond_timeout 快照 */
 
 void MeasurementState_Init(void)
 {
@@ -51,6 +52,7 @@ void MeasurementState_StartCommand(void)
     /* 每次测量都从短窗口起步 —— 由它决定要不要换长的。
      * 必须在 Current_Start() 之前设: Start 按窗口长度算抽点间隔。 */
     long_tried = 0U;
+    precond_to_at_start = precond_timeout;   /* 快照, 用于事后判断本次有没有超时 */
     Current_SetWindowTicks(CURRENT_WIN_SHORT_TICKS);
 
     Current_Start();
@@ -77,6 +79,7 @@ MeasurementProcessResult MeasurementState_Process(void)
 {
     float current;
     float current_ext;
+    float judge;
 
     switch (measurement_state)
     {
@@ -102,7 +105,14 @@ MeasurementProcessResult MeasurementState_Process(void)
          * 10 倍 (这正是"注释写拍、实际是点数"那类老坑的新形态) */
         measurement_ticks = Current_GetWindowTicks();
 
-        if ((fabsf(current) < DIRECT_MEASURE_THRESHOLD) && (long_tried == 0U))
+        /* 判据用**外部路 (X=)**, 不用内置路 (I=) —— 2026-09-13 用户裁定:
+         * "代码应该和内置 ADC 完全无关"。理由: 拿内置路判的话, 1nA 边界上两路
+         * 分歧(内置 1.01 / 外部 0.99)会让**同一个电流落到不同的窗口长度**,
+         * 数据前后不一致。而 README 与 main.c 都写明"表征以外部路为准"。
+         * 外部路无效(NaN/0)时才退回内置, 免得判据整个失效。 */
+        judge = (isfinite(current_ext) && (current_ext != 0.0f)) ? current_ext : current;
+
+        if ((fabsf(judge) < DIRECT_MEASURE_THRESHOLD) && (long_tried == 0U))
         {
             /* <1nA: 换 10s 窗口重测一次。
              * **同一条测量逻辑**, 只是窗口更长 —— 公式不用改。 */
@@ -123,7 +133,22 @@ MeasurementProcessResult MeasurementState_Process(void)
         measurement_result = current;
         measurement_result_ext = current_ext;
         result_is_longw = long_tried;
-        result_is_timeout = 0U;
+        /* 拉回相守卫超时 -> 开窗那一拍可能还没到位, 读数不可信, **必须上报**。
+         * 判据是"本次测量期间 precond_timeout 有没有涨" —— 不能用它的绝对值,
+         * 那是个跨测量只增的累计计数, 看过一次之后就永远非 0。
+         * 上报到结果行的 TIMEOUT 后缀 (采集脚本已能解析), 并让 OLED 显示出来。 */
+        result_is_timeout = (precond_timeout != precond_to_at_start) ? 1U : 0U;
+
+        /* ---- 首拍在轨 -> 这一窗同样不可信, 一并报成 TIMEOUT ----
+         * 2026-09-13 实测: 外部路的 0xFFFF 坏读**聚在窗口开头** ——
+         * 平均坏读率 0.085% (32/37500), 而首拍坏读率高达 1/6 = 17%,
+         * 相差 200 倍。所以专门查首拍, 不靠平均率去碰运气。
+         * (拉回相守卫超时与首拍在轨是两个不同原因, 但含义一样: 读数不可信,
+         *  所以复用同一个 TIMEOUT 标记; 结果行与 OLED 都已能显示。) */
+        if ((Current_GetFirstCode() >= 0xFF00U) || (Current_GetFirstCode() <= 0x00FFU))
+        {
+            result_is_timeout = 1U;
+        }
         MeasurementState_Finish();
         return MEASUREMENT_RESULT_READY;
     }

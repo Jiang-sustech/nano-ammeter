@@ -222,13 +222,17 @@ static void UART_SendExtDiag(void)
 {
     char line[128];
 
-    sprintf(line, "EXT N=%lu ERR=%lu TXE=%lu RXNE=%lu BSY=%lu PRE=%lu\r\n",
+    sprintf(line, "EXT N=%lu ERR=%lu TXE=%lu RXNE=%lu BSY=%lu PRE=%lu "
+                  "TINT=%luns TEXT=%luns FFFF=%lu\r\n",
             (unsigned long)Current_GetSampleCount(),
             (unsigned long)Current_GetExtBadRead(),
             (unsigned long)ads_spi_txe_timeout,
             (unsigned long)ads_spi_rxne_timeout,
             (unsigned long)ads_spi_bsy_timeout,
-            (unsigned long)precond_timeout);
+            (unsigned long)precond_timeout,
+            (unsigned long)t_int_ns,        /* 时序实测: 内置路单次耗时 */
+            (unsigned long)t_ext_ns,        /*           外部路单次耗时 */
+            (unsigned long)ext_ffff_cnt);   /* 外部路返回 0xFFFF 的次数 */
     UART_SendString(line);
 }
 /* USER CODE END 0 */
@@ -533,7 +537,9 @@ static void Measurement_Task(void)
     FormatCurrentNA(current, v);
     UART_SendResultLine(current, MeasurementState_GetResultExt(),
                         longw ? 2U : 1U, timeout);
-    OLED_DrawScreen(v, "nA", timeout ? "LONGW TMO" : (longw ? "MODE:10s" : "MODE:MEASURE"));
+    /* timeout 现在表示"拉回相守卫超时"= 读数不可信 (原来是"长窗口超时")。
+     * OLED 上要明确写成"数据无效", 不能让人以为只是窗口不一样。 */
+    OLED_DrawScreen(v, "nA", timeout ? "INVALID PRE" : (longw ? "MODE:10s" : "MODE:MEASURE"));
   }
 }
 

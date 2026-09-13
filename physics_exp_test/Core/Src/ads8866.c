@@ -26,7 +26,7 @@
 #define CONVST_PORT     GPIOA
 #define CONVST_PIN      GPIO_PIN_4
 
-#define T_CONV_US       9U          /* >= tconv-max 8.8us, 留余量 */
+#define T_CONV_US       12U         /* tconv-max = 8.8us (手册 SBAS614, 与 SCLK 无关, 芯片内部时钟) —— 原来取 9us 只留 2.3% 余量, 太薄: 转换稍慢就读回**上一次的样本**, 一个看不出来的滞后一拍。改 12us 留 36%。代价 +3us/次, 总 18.4us 仍只占 160us 节拍的 11.5% */
 #define SPI_GUARD       100000U
 
 /* DWT 微秒延时 (80MHz 主频)。

@@ -62,10 +62,44 @@ static uint32_t ext_bad_read;               /* 坏读累计 (跨窗口只增不�
  * **这个判据只影响 ERR 这个诊断计数, 永远不影响测量数值。** */
 #define RAIL_DETECT_CODE  0xF000U       /* 内置压轨判据 (满轨实测 0xFFF0) */
 
+/* 阻塞 n 微秒 (DWT 忙等, 80MHz)。中断里不能用 HAL_Delay (SysTick 被饿死) */
+static void DelayUs(uint32_t us)
+{
+    uint32_t t0 = DWT->CYCCNT;
+    while ((DWT->CYCCNT - t0) < (us * 80U)) { }
+}
+
 static uint16_t ReadBoth(uint16_t *ext_out)
 {
-    uint16_t r_int = Adc_ReadRaw();
+    uint32_t c0;
+
+#if USE_INTERNAL_ADC
+    uint16_t r_int;
+    c0 = DWT->CYCCNT;
+    r_int = Adc_ReadRaw();
+    t_int_ns = (DWT->CYCCNT - c0) * 100U / 8U;      /* 12.5ns/周期 -> ns */
+    c0 = DWT->CYCCNT;
     uint16_t r_ext = ADS8866_ReadRaw();
+#else
+    /* 试验期: 内置路不读。
+     *
+     * **但 CONVST 不能紧贴节拍边界** —— 实测 (6 窗 x 6250 拍):
+     *   去掉内置那 8.2us 的间隔后, 外部路的 0xFFFF 坏读从每窗 ~0 涨到
+     *   平均 31 次 (186 次/6 窗, 0.5%); 而**首拍的坏读率高达 1/6 = 17%**,
+     *   比平均高 33 倍 —— 每次都栽在第一次。
+     * 怀疑 CONVST 边沿撞上了 TIM6 中断入口附近的活动。
+     * 这里补一个预延时把它推回原来的时间位置附近, 验证这个假设。
+     * (注意: 这**不是**在读内置路 —— 内置 ADC 完全不参与 ✓) */
+    t_int_ns = 0U;
+    DelayUs(EXT_PREDELAY_US);
+    c0 = DWT->CYCCNT;
+    uint16_t r_ext = ADS8866_ReadRaw();
+#endif
+    t_ext_ns = (DWT->CYCCNT - c0) * 100U / 8U;
+    if (r_ext == 0xFFFFU) { ext_ffff_cnt++; }
+
+#if USE_INTERNAL_ADC
+    /* ---- 两路都在: 用交叉判据区分"真撞轨"与"真断线" ---- */
     uint8_t  ext_full = (uint8_t)((r_ext == 0xFFFFU) || (r_ext == 0x0000U));
 
     if (ext_full)
@@ -85,10 +119,48 @@ static uint16_t ReadBoth(uint16_t *ext_out)
     }
 
     *ext_out = r_ext;
-    return r_int;
+    return r_int;                   /* 控制值 = 内置路 */
+#else
+    /* ---- 试验期: 内置路不读, 控制值 = 外部读数 ---- */
+    /* 顺序变了: 原来"先内后外"是因为控制判决必须基于本 tick **最早**那一刻;
+     * 现在只剩一路, 那个理由不存在了 —— 控制判决点自然就是外部读数的时刻。
+     * (代价: 判决点比原来晚 ~8us; 理论上均匀偏移、无系统误差, 待实测) */
+    /* 坏读判据退化为单路版: 原靠两路交叉(见 USE_INTERNAL_ADC 注释②), 现在
+     * 只能按外部值判, 0x0000/0xFFFF 都记坏读。代价是输入撞轨时会把有效读数
+     * 记成坏读(ERR 虚高) —— 但**只影响 ERR 这个诊断计数, 不影响测量数值**。 */
+    if ((r_ext == 0xFFFFU) || (r_ext == 0x0000U))
+    {
+        ext_bad_read++;
+    }
+
+    *ext_out = r_ext;
+    return r_ext;                   /* 控制值 = 外部路 */
+#endif
 }
 
-/* 模式二逐 tick 波形入队 (满了就停, 不覆盖) */
+/* 读一次"控制值" —— 按 USE_INTERNAL_ADC 决定用哪一路。
+ * 给那些**自己直接调 Adc_ReadRaw()** 的场合用 (PullToZero / CAL_ZERO 等),
+ * 这样切宏时它们会跟着切, 不必逐处改 —— 少一处漏改就少一个"一半内置一半外部"
+ * 的诡异状态。 */
+/* ---- 时序实测 (2026-09-13 加) ----
+ * 之前 8.2us / 10.6us 都是按**配置推算**的, 从没实测过。而它直接决定一件事:
+ * ADS8866 的转换时间是不是 <= 驱动里 `DWT_DelayUs(9)` 那个**盲等** ——
+ * 如果不够, SPI 读回来的是**上一次的样本**, 一个隐性的滞后一拍, 而且没人知道。
+ * ext_ffff_cnt: 外部路返回 0xFFFF 的次数 —— 它既是"转换未完成"的特征,
+ * 也是合法满量程码, 分开数才知道到底是哪种。 */
+volatile uint32_t t_int_ns;         /* 内置路单次读取耗时 (ns) */
+volatile uint32_t t_ext_ns;         /* 外部路单次读取耗时 (ns) */
+volatile uint32_t ext_ffff_cnt;     /* 外部路返回 0xFFFF 的累计次数 */
+
+uint16_t Current_ReadControl(void)
+{
+#if USE_INTERNAL_ADC
+    return Adc_ReadRaw();
+#else
+    return ADS8866_ReadRaw();
+#endif
+}
+
 static volatile float window_current;       /* 窗口结果, 由**内置 ADC** 算出 (控制路径) */
 static volatile float window_current_ext;   /* 同一窗口, 由 **ADS8866** 算出 (观测路径) */
 
@@ -592,7 +664,12 @@ float Current_GetSwingVoltage(void)
  * 按 5pA 算 1000 秒要漂 50V, 而摆幅只有 ±4.3V, 必然撞轨。 */
 void Current_PullToZero(void)
 {
-    uint16_t raw = Adc_ReadRaw();
+    /* 用 Current_ReadControl() 而不是直接调 Adc_ReadRaw() —— 这样切
+     * USE_INTERNAL_ADC 时这里会跟着切, 不会出现"测量走外部、复位走内置"
+     * 那种一半一半的状态。
+     * 注: 守卫的时间预算随之变化 —— PULLZERO_GUARD=10000 次, 内置每次约 8us
+     * (80ms 上限), 外部每次约 11us (110ms 上限), 都远大于最坏行程 10.6ms。 */
+    uint16_t raw = Current_ReadControl();
     uint32_t guard;
 
     ThresholdCodes_Init();
@@ -602,14 +679,14 @@ void Current_PullToZero(void)
         guard = PULLZERO_GUARD;
         ADG_Enable();
         ADG_Select_Negative();
-        while ((raw > code_zero) && (guard != 0U)) { raw = Adc_ReadRaw(); guard--; }
+        while ((raw > code_zero) && (guard != 0U)) { raw = Current_ReadControl(); guard--; }
     }
     else if (raw < code_zero)
     {
         guard = PULLZERO_GUARD;
         ADG_Enable();
         ADG_Select_Positive();
-        while ((raw < code_zero) && (guard != 0U)) { raw = Adc_ReadRaw(); guard--; }
+        while ((raw < code_zero) && (guard != 0U)) { raw = Current_ReadControl(); guard--; }
     }
     ADG_Disable();                          /* 断开参考: 只让被测电流积分 */
 }
