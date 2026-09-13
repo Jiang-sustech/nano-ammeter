@@ -23,6 +23,7 @@
 #include "button.h"
 #include "current.h"
 #include "measurement_state.h"
+#include "cal_coef.h"
 #include "cal_mode.h"
 #include <stdio.h>
 /* USER CODE END Includes */
@@ -33,8 +34,12 @@
 /* PB4 按键硬件故障 (恒读低), 全部按键功能关闭 (用户决定):
  * 控制一律走串口/HTML 控制台; PB4 修好后删掉此宏即可恢复 */
 #define BUTTON_DISABLED
-static uint8_t noise_mode_active = 0;
 static uint8_t has_result = 0;
+/* 1 = HSE 8MHz 晶振; 0 = MSI 内部 RC (实测 HSE 起振正常, 见 docs) */
+#ifndef CLOCK_USE_HSE
+#define CLOCK_USE_HSE 1
+#endif
+
 const char *clock_source_name = "?";   /* 实际用上的时钟源, READY 行报出来 */
 /* USER CODE END PV */
 
@@ -42,15 +47,14 @@ const char *clock_source_name = "?";   /* 实际用上的时钟源, READY 行报
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 static void Measurement_Task(void);
-static void Noise_Task(void);
 static void OLED_DrawScreen(const char *value, const char *unit, const char *mode);
 static void FormatCurrentNA(float current, char *buf);
-static void UART_SendResultLine(float current, uint8_t mode, uint8_t timeout);
+static void UART_SendResultLine(float cur_int, float cur_ext, uint8_t mode,
+                                uint8_t timeout);
 static void UART_SendResultQuery(void);
 static void UART_DumpBuffer(const char *tag, uint16_t (*get)(uint32_t), uint32_t count);
 static void UART_DumpWaveform(void);
 static void UART_DumpExtWaveform(void);
-static void UART_DumpNoiseSeries(void);
 static void UART_SendExtDiag(void);
 /* USER CODE END PFP */
 
@@ -79,14 +83,69 @@ static void FormatCurrentNA(float current, char *buf)
     UART_FormatScaled((int64_t)v, 3, buf);
 }
 
-/* 结果上报: "I=+12.345 nA MODE=1" (超时追加 " TIMEOUT" 后缀) */
-static void UART_SendResultLine(float current, uint8_t mode, uint8_t timeout)
+/* 结果行: 两个 ADC 的结果都报, 校准生效且非超时时再追加校准值。
+ *
+ *   I=<内置> X=<外部> MODE=<n> T=<ms> [TIMEOUT] [CAL=<校准后>]
+ *   MODE=1 再追加 RAW m=.. n=.. INT1=.. INT2=.. EXT1=.. EXT2=..
+ *
+ * I= 保持与原固件兼容 (上位机的解析正则不锚定行尾); X= 是 ADS8866 的结果,
+ * 物理实验表征以它为准; CAL= 由 X= 经分段校准模型算出, 报告要的是它。
+ * 超时时数值无意义, 不出 CAL=。
+ *
+ * RAW 段是离线拟合要用的原始量: m/n = POS/NEG 周期数, INT1/INT2 与 EXT1/EXT2
+ * = 窗口首尾两个端点的原始码 (内置那路 / ADS8866 那路)。INT1/EXT1 是拉回相最后
+ * 一拍的采样 (V_01), 不是 voltage_buf[0] —— 式(6) 用的端点就是它。只报电流值的话这些量
+ * 就丢了 —— 而 (m+n) 与 (m+n-1) 两种分母之争、以及分段系数 a/b 的拟合,
+ * 都得从**同一次测量**的原始量出发, 不然只能靠反推。报告的表 4-9~4-14 也用得上。
+ *
+ * 仅 MODE=1 (电荷平衡窗口) 出这一段: 小电流模式不算 m/n, 用的是起点/终点
+ * 两段平均, 原始量是另一套 (结果行的 T= 已经给了它的实际积分拍数)。 */
+static void UART_SendResultLine(float cur_int, float cur_ext, uint8_t mode,
+                                uint8_t timeout)
 {
-    char v[24];
-    char line[64];
+    char vi[24], vx[24], vc[24];
+    /* 最坏情况: 三个值各占满 24 字节 -> 2+24+6+24+8+1+5+24+2 = 96;
+     * 再加 RAW 段 (最长约 60 字节) 与结尾 NUL。192 留足余量, snprintf 兜底 */
+    char line[192];
+    char raw[80] = "";
 
-    FormatCurrentNA(current, v);
-    sprintf(line, "I=%s nA MODE=%u%s\r\n", v, mode, (timeout != 0U) ? " TIMEOUT" : "");
+    FormatCurrentNA(cur_int, vi);
+    FormatCurrentNA(cur_ext, vx);
+
+    if (mode == 1U)
+    {
+        uint32_t npt = Current_GetSampleCount();
+
+        if (npt > 0U)                /* 没采到样就不出, 免得报一堆 0 */
+        {
+            snprintf(raw, sizeof(raw),
+                     " RAW m=%lu n=%lu INT1=%u INT2=%u EXT1=%u EXT2=%u",
+                     (unsigned long)Current_GetMCount(),
+                     (unsigned long)Current_GetNCount(),
+                     (unsigned)Current_GetFirstCode(),
+                     (unsigned)Current_GetSample(npt - 1U),
+                     (unsigned)Current_GetFirstCodeExt(),
+                     (unsigned)Current_GetExtSample(npt - 1U));
+        }
+    }
+
+    if ((timeout == 0U) && Cal_IsValid())
+    {
+        FormatCurrentNA(Cal_Apply(cur_ext), vc);
+        snprintf(line, sizeof(line),
+                 "I=%s nA X=%s nA MODE=%u T=%lums CAL=%s%s\r\n",
+                 vi, vx, mode,
+                 (unsigned long)(MeasurementState_GetTicks() * 160U / 1000U),
+                 vc, raw);
+    }
+    else
+    {
+        snprintf(line, sizeof(line),
+                 "I=%s nA X=%s nA MODE=%u T=%lums%s%s\r\n",
+                 vi, vx, mode,
+                 (unsigned long)(MeasurementState_GetTicks() * 160U / 1000U),
+                 (timeout != 0U) ? " TIMEOUT" : "", raw);
+    }
     UART_SendString(line);
 }
 
@@ -103,7 +162,7 @@ static void UART_SendResultQuery(void)
     }
 
     FormatCurrentNA(MeasurementState_GetResult(), v);
-    sprintf(line, "RESULT I=%s nA MODE=%u%s\r\n", v, MeasurementState_ResultIsHard() ? 2U : 1U, (MeasurementState_ResultIsTimeout() != 0U) ? " TIMEOUT" : "");
+    sprintf(line, "RESULT I=%s nA MODE=%u%s\r\n", v, MeasurementState_ResultIsSmallI() ? 2U : 1U, (MeasurementState_ResultIsTimeout() != 0U) ? " TIMEOUT" : "");
     UART_SendString(line);
 }
 
@@ -146,13 +205,6 @@ static void UART_DumpWaveform(void)
 static void UART_DumpExtWaveform(void)
 {
     UART_DumpBuffer("WAVEX", Current_GetExtSample, Current_GetSampleCount());
-}
-
-/* W 指令: 回传最近一次底噪测量的逐秒序列 (1 点/秒, 共 50 点)
- * 与 B/X 同格式, 头字 NOISE。压轨时这串点会是一条平直线, 图上直接可见 */
-static void UART_DumpNoiseSeries(void)
-{
-    UART_DumpBuffer("NOISE", Noise_GetSample, Noise_GetSampleCount());
 }
 
 /* E 指令: 观测通路健康度一行 (免去 12.5KB 回传就能判断好坏)
@@ -217,6 +269,7 @@ int main(void)
 #endif
   UART_Init_RX();
   MeasurementState_Init();
+  Cal_Init();                 /* 从 Flash 读校准系数 */
 
 #if CAL_MODE != CAL_NONE
   /* ---- 标定固件: 专属主流程 (正常固件 CAL_MODE=CAL_NONE 不编译) ---- */
@@ -230,12 +283,12 @@ int main(void)
     CalMode_Task();
   }
 #else
-  OLED_DrawScreen("+0.000", "nA", "MODE:IDLE");
   {
-  char buf[80];
-  sprintf(buf, "NANO-AMMETER READY (%s)\r\n", clock_source_name);
-  UART_SendString(buf);
-}
+    char buf[80];
+    sprintf(buf, "NANO-AMMETER READY (%s)\r\n", clock_source_name);
+    UART_SendString(buf);
+  }
+  OLED_DrawScreen("+0.000", "nA", "MODE:IDLE");
 #endif
   /* USER CODE END 2 */
 
@@ -251,38 +304,44 @@ int main(void)
     Button_Task();
 #endif
 
-    /* 测量/底噪期间忽略一切指令 (单次语义: 测完自动回 IDLE 后才接受新指令) */
-    if (!noise_mode_active
-        && MeasurementState_GetState() == MEASUREMENT_STATE_IDLE)
+    /* 测量期间忽略一切指令 (单次语义: 测完自动回 IDLE 后才接受新指令) */
+    if (MeasurementState_GetState() == MEASUREMENT_STATE_IDLE)
     {
-      /* 长按(>3s): 底噪/偏置电流测量 (ADG 全断, 纯积分) */
-#ifndef BUTTON_DISABLED
-      if (Button_LongPressRequested())
-      {
-        Noise_Start();
-        noise_mode_active = 1;
-        OLED_DrawScreen("+0.000", "nA", "MODE:NOISE");
-        UART_SendString("NOISE START (50s)\r\n");
-        Button_MeasurementDone();
-      }
-#endif
+      /* 串口指令: S=单次测量   D=查询结果
+       *           B=内置 ADC 波形  X=ADS8866 波形  E=观测通路自检
+       * 参数化指令 (整行):
+       *   C                    查询分段系数 a/b
+       *   K<段>,<a_ppm>,<b_fA> 写入分段系数        Z 清除分段系数
+       *   Q                    查询物理常数 q/I+/I-
+       *   Q<q_aC>,<i+_pA>,<i-_pA>  写入物理常数
+       *   T<秒>                小电流模式积分时长 */
+      /* 物理常数与分段系数分成两组指令: 前者是仪器的实测属性, 后者是拟合出来的
+       * 修正; 混在一起会让人以为 Z 会把标定好的 q 一起清掉 */
+      /* 整行接收: 参数化指令 (K/C/Z) 需要整行; 单字符指令走同一个缓冲,
+       * 长度 1 的行就是简单指令 */
+      char line[UART_LINE_MAX];
+      char cmd = 0x00;
 
-      /* 串口指令: S=单次测量 N=底噪 D=查询结果
-       *           B=回传内置 ADC 波形 X=回传 ADS8866 波形 E=观测诊断
-       *           W=回传底噪逐秒序列 */
-      char cmd = UART_GetCommand();
+      if (UART_GetLine(line, sizeof(line)))
+      {
+        cmd = line[0];
+        if (cmd == 'K') { Cal_HandleSetLine(line); cmd = 0x00; }
+        else if (cmd == 'C') { Cal_Report(); cmd = 0x00; }
+        else if (cmd == 'Z') { Cal_Clear(); cmd = 0x00; }
+        else if (cmd == 'Q')
+        {
+          /* 裸 Q = 查询, 带参数 = 写入 */
+          if (line[1] == '\0') { Cal_ReportPhys(); }
+          else                 { Cal_HandlePhysLine(line); }
+          cmd = 0x00;
+        }
+      }
       switch (cmd)
       {
       case 'S':
         MeasurementState_StartCommand();
         OLED_DrawScreen("+0.000", "nA", "MODE1 RUN");
         UART_SendString("START MODE1\r\n");
-        break;
-      case 'N':
-        Noise_Start();
-        noise_mode_active = 1;
-        OLED_DrawScreen("+0.000", "nA", "MODE:NOISE");
-        UART_SendString("NOISE START (50s)\r\n");
         break;
       case 'D':
         UART_SendResultQuery();
@@ -295,9 +354,6 @@ int main(void)
         break;
       case 'E':
         UART_SendExtDiag();
-        break;
-      case 'W':
-        UART_DumpNoiseSeries();
         break;
       default:
         break;
@@ -315,8 +371,6 @@ int main(void)
 #endif
     }
 
-    /* 底噪任务: 50s 积分结束后拟合斜率 -> I_bias */
-    Noise_Task();
 
     /* 测量任务: 非阻塞推进 (TIM6 中断采样, 主循环查状态) */
     Measurement_Task();
@@ -342,20 +396,31 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
   /** 时钟源: HSE 8MHz 晶振 -> PLL -> SYSCLK 80MHz
-  * 2026-09-12 实测本板 HSE 起振正常 (RCC_CR.HSERDY 置位, 示波器 7.999989MHz)。
-  *   8MHz / M(2) = 4MHz VCO 输入;  x N(40) = 160MHz VCO;  / R(2) = 80MHz
-  *
-  * **PLLM 不能取 1**: 实测 HSE 8MHz + PLLM=1/N=20 会 INVSTATE HardFault
-  * (VCO 输入 8MHz 在规格内、ST 文档无禁止条款, 但实测就是崩)。
-  * 换 PLLM=2/N=40 (VCO 输入 4MHz, 输出同样 160MHz/80MHz) 就正常。
+  * 2026-09-12 实测本板 HSE 起振正常 (RCC_CR.HSERDY 置位), 比 MSI 准得多。
+  *   8MHz / M(1) = 8MHz 输入;  x N(20) = 160MHz VCO;  / R(2) = 80MHz
   *
   * HSE 起不来就退回 MSI (48/6 x20 /2 = 80MHz), **不要直接 Error_Handler** ——
   * 那样整机卡死, 连串口都没了没法诊断。用哪个源会在 READY 行报出来。
   */
+#if CLOCK_USE_HSE == 2
+  /* 诊断模式: SYSCLK 直接取 HSE, **不过 PLL**。
+   * 好处: flash 等待周期只需 0~1 个, 无论晶振多少 MHz 都不会因超频而崩,
+   *       也就不会掩盖问题。
+   * 串口波特率随之变成 115200 x F / 80 (F 单位 MHz) —— 扫波特率即可
+   * 反推晶振实际频率。
+   */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    clock_source_name = "HSE 直连失败";
+    Error_Handler();
+  }
+  clock_source_name = "HSE direct (DIAG)";
+#elif CLOCK_USE_HSE
+  /* 试 PLLM=2 (VCO 输入 4MHz, 规格下限内) 而不是 M=1 —— 排除 M=1 是否被硬件拒绝 */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
@@ -384,17 +449,45 @@ void SystemClock_Config(void)
   {
     clock_source_name = "HSE 8MHz";
   }
+#else
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
+  RCC_OscInitStruct.MSIState = RCC_MSI_ON;
+  RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_11;
+  RCC_OscInitStruct.MSICalibrationValue = RCC_MSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_MSI;
+  RCC_OscInitStruct.PLL.PLLM = 6;
+  RCC_OscInitStruct.PLL.PLLN = 20;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV7;
+  RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
+  RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  clock_source_name = "MSI 48MHz";
+#endif
 
   /** Initializes the CPU, AHB and APB buses clocks
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+#if CLOCK_USE_HSE == 2
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSE;
+#else
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+#endif
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
+#if CLOCK_USE_HSE == 2
+  /* HSE 直连: F<=16MHz 0 WS, <=32MHz 1 WS —— 取 1 稳妥 */
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+#else
+  /* PLL 到 80MHz (VOS1) 需 4 WS */
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
+#endif
   {
     Error_Handler();
   }
@@ -404,82 +497,34 @@ void SystemClock_Config(void)
 
 /* 测量任务: 主循环每轮调用, 非阻塞推进
  * 模式一: 每秒 1 个窗口结果, 自动上报串口并刷新屏幕;
- *         <1nA 自动切模式二 (10s 多循环) -> 出结果后自动回模式一 */
+ *         <1nA 自动切小电流模式 -> 出结果后自动回空闲
+ * 注: 结果行的 MODE= 仍是 1/2 —— 2 表示"来自 <1nA 那条支路"。
+ *     小数电流模式取代了旧的双斜率, 但字段编码不动, 免得破坏上位机解析。 */
 static void Measurement_Task(void)
 {
   MeasurementProcessResult process_result = MeasurementState_Process();
 
-  if (process_result == MEASUREMENT_MODE2_STARTED)
+  if (process_result == MEASUREMENT_SMALLI_STARTED)
   {
-    OLED_DrawScreen("+0.000", "nA", "MODE2 RUN");
-    UART_SendString("MODE2 START (I<1nA)\r\n");
+    OLED_DrawScreen("+0.000", "nA", "SMALL-I RUN");
+    UART_SendString("SMALLI START (I<1nA)\r\n");
   }
   else if (process_result == MEASUREMENT_RESULT_READY)
   {
     float current = MeasurementState_GetResult();
-    uint8_t hard = MeasurementState_ResultIsHard();
+    uint8_t smi = MeasurementState_ResultIsSmallI();
     uint8_t timeout = MeasurementState_ResultIsTimeout();
     char v[24];
 
     has_result = 1;
     FormatCurrentNA(current, v);
-    UART_SendResultLine(current, hard ? 2U : 1U, timeout);
-    OLED_DrawScreen(v, "nA", timeout ? "MODE2 TIMEOUT" : (hard ? "MODE:HARD" : "MODE:MEASURE"));
+    UART_SendResultLine(current, MeasurementState_GetResultExt(),
+                        smi ? 2U : 1U, timeout);
+    OLED_DrawScreen(v, "nA", timeout ? "SMALL-I TMO" : (smi ? "MODE:SMALLI" : "MODE:MEASURE"));
   }
 }
 
 /* 底噪测量任务: 50s 积分结束后输出拟合偏置电流 (fA 量级) */
-static void Noise_Task(void)
-{
-  float ibias;
-  static uint32_t last_reported_sec = 0;
-
-  if (!noise_mode_active)
-  {
-    last_reported_sec = 0;
-    return;
-  }
-
-  /* 每 10s 报一次进度, 演示时可见 */
-  uint32_t elapsed = Noise_GetElapsedSec();
-  if (elapsed != last_reported_sec && (elapsed % 10U) == 0U)
-  {
-    char line[32];
-    sprintf(line, "NOISE %lu/50s\r\n", (unsigned long)elapsed);
-    UART_SendString(line);
-    last_reported_sec = elapsed;
-  }
-
-  if (Noise_IsFinished())
-  {
-    char fb[24];
-    char line[96];
-
-    if (Noise_IsSaturated())
-    {
-      /* 积分器在 50s 内撞轨并平躺 -> 拟合斜率恒为 0。
-       * 这个 0 是"没采到数据", 不是"偏置为零", 必须说清楚,
-       * 否则一个 +0.0 fA 会被当成真实的极小偏置电流接受下来。 */
-      sprintf(line, "IBIAS=RAIL (saturated, code %u..%u; input too large)\r\n",
-              (unsigned)Noise_GetMinCode(), (unsigned)Noise_GetMaxCode());
-      UART_SendString(line);
-      OLED_DrawScreen("RAIL", "fA", "MODE:NOISE");
-    }
-    else
-    {
-      ibias = Noise_GetBiasCurrent();
-      UART_FormatScaled((int64_t)((double)ibias * 1e15), 1, fb);   /* fA 1 位小数 */
-      sprintf(line, "IBIAS=%s fA\r\n", fb);
-      UART_SendString(line);
-      OLED_DrawScreen(fb, "fA", "MODE:NOISE");
-    }
-
-    /* 注意: 这里不能置 has_result —— D 指令查的是 MeasurementState 的
-     * 测量结果, 与底噪无关。置了会让 D 报出一个从没测过的测量值 */
-    noise_mode_active = 0;
-    Button_MeasurementDone();
-  }
-}
 /* USER CODE END 4 */
 
 /**

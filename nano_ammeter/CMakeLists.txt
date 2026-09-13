@@ -47,6 +47,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     Core/Src/sh1106.c
     Core/Src/uart.c
+    Core/Src/cal_coef.c
     Core/Src/current.c
     Core/Src/measurement_state.c
     Core/Src/adg4530.c

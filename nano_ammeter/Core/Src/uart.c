@@ -144,25 +144,94 @@ void UART_FormatScaled(int64_t value, uint8_t decimals, char *buf)
     *p = '\0';
 }
 
+/* ---- 整行缓冲 (参数化指令用) ----
+ * 单字符环形队列只认字母, 装不下 "K0,998765,-123" 这类带参指令。
+ * 这里再挂一层行缓冲: 收到 '\n' 就把整行标记为可取。
+ *
+ * 并发: 缓冲区写在 ISR 里、读在主循环里。用 line_ready 做闸门 ——
+ * 上一行还没被取走时, 新到的字节直接丢弃, 避免主循环读到半截。
+ * (指令是人敲的, 不会连发; 丢弃比竞态安全) */
+static volatile char    line_buf[UART_LINE_MAX];
+static volatile uint8_t line_len;
+static volatile uint8_t line_ready;
+static volatile uint8_t line_drop;      /* 本行超长, 丢弃到下一个换行 */
+
+uint8_t UART_GetLine(char *out, uint8_t max)
+{
+    uint8_t i;
+
+    if (!line_ready)
+    {
+        return 0U;
+    }
+
+    for (i = 0U; i < line_len && i < (uint8_t)(max - 1U); i++)
+    {
+        out[i] = line_buf[i];
+    }
+    out[i] = '\0';
+
+    line_len = 0U;
+    line_ready = 0U;
+    return 1U;
+}
+
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     char cmd = 0;
+    char c;
 
     if (huart->Instance != USART1)
     {
         return;
     }
 
+    c = (char)rx_byte;
+
+    /* ---- 行缓冲 ---- */
+    if (c == '\n')
+    {
+        if (line_drop)
+        {
+            line_drop = 0U;
+            line_len = 0U;
+        }
+        else if (line_len > 0U && !line_ready)
+        {
+            line_buf[line_len] = '\0';
+            line_ready = 1U;
+        }
+        else
+        {
+            line_len = 0U;              /* 上一行没人取, 或空行 */
+        }
+    }
+    else if (c != '\r' && !line_drop)
+    {
+        if (line_ready)
+        {
+            /* 上一行还没被取走: 丢弃, 免得主循环读到半截 */
+        }
+        else if (line_len < (UART_LINE_MAX - 1U))
+        {
+            line_buf[line_len++] = c;
+        }
+        else
+        {
+            line_drop = 1U;             /* 超长: 丢弃整行 */
+            line_len = 0U;
+        }
+    }
+
+    /* ---- 单字符指令 (保留原路径) ---- */
     switch (rx_byte)
     {
     case 'S': case 's': cmd = 'S'; break;
-    case 'N': case 'n': cmd = 'N'; break;
     case 'D': case 'd': cmd = 'D'; break;
     case 'B': case 'b': cmd = 'B'; break;
     case 'X': case 'x': cmd = 'X'; break;   /* ADS8866 并行观测波形 */
     case 'E': case 'e': cmd = 'E'; break;   /* 观测通路诊断 */
-    case 'W': case 'w': cmd = 'W'; break;   /* 底噪逐秒序列 */
-    default: break;   /* 行结束符等忽略 */
+    default: break;   /* 参数化指令与行结束符走上面的行缓冲 */
     }
 
     if (cmd != 0 && (cmd_head + 1) % CMD_RING_SIZE != cmd_tail)

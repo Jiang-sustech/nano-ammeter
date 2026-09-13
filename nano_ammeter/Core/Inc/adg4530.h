@@ -14,7 +14,7 @@ void ADG_Select_Negative(void);
  *   0  X  | Off Off
  *   1  0  | On  Off
  *   1  1  | Off On
- * EN(PB2) 高有效: 0=全部断开 (双斜率上积相用, 参考电流不注入)
+ * EN(PB2) 高有效: 0=全部断开 (纯积分模式用: 参考电流不注入)
  * 实测: EN=1/IN=1 时 U3.6=-5.002V (B 导通) */
 void ADG_Disable(void);
 

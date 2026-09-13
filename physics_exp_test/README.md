@@ -1,68 +1,85 @@
 # physics_exp_test — 实验表征固件
 
-> ## ⚠️ 本工程是 `nano_ammeter/` 的**整份拷贝**
+> ## 本工程与 `nano_ammeter/` 的关系（2026-09-13 重新厘清）
 
 ```
-nano_ammeter/        竞赛交付固件（保持干净，不含表征机械）
-physics_exp_test/    实验表征固件（本工程）
+nano_ammeter/        竞赛交付固件
+physics_exp_test/    实验表征固件（本工程）= 交付固件 + M 手动连采指令
 ```
 
-两者**源码独立**，因此**会漂移**。改动时请遵守下面的约定。
+**2026-09-13 做了一次整份同步**：此前两份工程已经漂移到"`current.c` 差 1053 行、
+`nano_ammeter` 连 `cal_coef` 都没有"的地步，靠人工定点同步不可靠。现在的关系是
+**单向的**：本工程 = 交付固件 + 一块表征机械，其余**逐字节相同**。
 
-## 两个工程的分工
+### 现在**唯一**的差别：`M` 手动连采指令
 
-| | `nano_ammeter/` | `physics_exp_test/` |
-|---|---|---|
-| 模式一 电荷平衡（≥1 nA，1 秒窗口） | ✅ | ✅ |
-| 模式二 双斜率硬积分（<1 nA，下限约 6 pA） | ✅ | **已删除** |
-| **小电流模式**（纯积分+斜率，1 pA~1 nA） | ❌ | ✅ |
-| 结果行带 `X=`（ADS8866 那一路） | ❌ | ✅ |
-| 结果行带 `T=`（实际积分时间） | ❌ | ✅ |
-| 波形回传 `B` / `X`、自检 `E` | ✅ | ✅ |
-| 分段校准系数 `I_cal = a·I_raw + b` | ❌ | ✅ |
-| 串口写入系数 + 掉电保存 | ❌ | ✅ |
-| 底噪测量（`N` / `W`） | 仍在（待删） | **已删除** |
+| 文件 | 差异 |
+|---|---|
+| `Core/Src/current.c` | +149 行：`Current_ManualRun` / `Current_ManualLine` |
+| `Core/Inc/current.h` | +11 行：上面两个的声明 |
+| `Core/Src/main.c`   | +6 行：`M` 指令分发 |
+| `Core/Inc/uart.h`   | +8 行：`M` 的协议说明 |
 
-**为什么替掉模式二**：双斜率在 1 pA 时上积相要
-`t1 = C·ΔV/I = 100pF×2V/1pA = 200 秒`，而预算只有 10 秒 —— 连一个循环都
-跑不完，这就是"约 6 pA 下限"的由来。小电流根本不需要参考电流拉回：
-1 pA 积 3 秒才 30 mV，离 ±4.3 V 的轨远得很，直接积、测首尾两点即可。
+```bash
+# 验证：差异只应出现在上面四处
+cd nanoammeter_repo
+for f in $(cd physics_exp_test && ls Core/Src/*.c Core/Inc/*.h | sed 's|Core/||'); do
+  d=$(diff <(tr -d '\r' < nano_ammeter/Core/$f) <(tr -d '\r' < physics_exp_test/Core/$f) | grep -c '^[<>]')
+  [ "$d" -gt 0 ] && printf "%-30s %4d 行\n" "$f" "$d"
+done
+```
 
-删除模式二顺带释放了 **8120 字节 RAM**（两个 2048×2 的逐 tick trace 缓冲）。
+**交付固件不要 `M` 是正确的** —— 它是表征机械，量 τ、标 `q`、做判别实验用的，
+现场测量用不到，留在交付固件里只会多一份出错面。
 
-**这四项就是两个工程的全部差别**，其余代码应当逐字节相同。
+### 双斜率硬积分已从**两个**工程删除（2026-09-13）
+
+原"模式二 双斜率硬积分"（<1 nA，下限约 6 pA）废弃，由**小电流模式**取代：
+双斜率在 1 pA 时上积相要 `t1 = C·ΔV/I = 100pF×2V/1pA = 200 秒`，而预算只有
+10 秒 —— 连一个循环都跑不完。小电流根本不需要参考电流拉回：1 pA 积 3 秒才
+30 mV，离 ±4.3 V 的轨远得很，直接积、测首尾两点即可。
+
+**还有一个当时没意识到的理由**：双斜率靠 `EN=0`（Hi-Z）做"零参考"，而那个
+浮空节点的寄生电容会注入一个指数衰减的暂态电荷（实测 `C_p ≈ 4.9 pF`、
+`τ ≈ 490 µs`、`Q ≈ 24 pC`）。小电流模式同样受它影响，但**可控** ——
+把 `SI_SETTLE_TICKS` 加大到 `>5τ` 即可（已改为 128 次 ≈ 3.0 ms）。
+
+> `SI_SETTLE_TICKS` 的单位是**阻塞 `ReadBoth` 的次数**（每次约 23.6 µs），
+> **不是 160 µs 的 TIM6 拍**。旧注释写成"稳定拍数"会让读者差 6.8 倍。
 
 ## 防漂移约定
 
-### 必须逐字节相同的（改一边就要拷过去）
+### 必须逐字节相同的
 
 ```
 Core/Src/adc.c
 Core/Src/ads8866.c   Core/Inc/ads8866.h      <- 含坏读判据的驱动层, 两边同源
 Core/Src/sh1106.c
 Drivers/                                      <- 整个目录
+Core/Src/cal_coef.c  Core/Inc/cal_coef.h      <- 物理常数存储, 两边都要
+STM32L431xx_FLASH.ld                          <- 最后一页留给校准常数
 ```
+
+> **链接脚本那一页必须两边都留。** `nano_ammeter` 原来没留（它那时也没有
+> `cal_coef.c`），同步进 `cal_coef` 之后必须补上 —— 否则代码长到 `0x0803F800`
+> 那一页上，`Cal_Save()` 一写就把自己的代码擦了。
 
 ```bash
 cd nanoammeter_repo
-for f in Core/Src/adc.c Core/Src/ads8866.c Core/Inc/ads8866.h Core/Src/sh1106.c; do
+for f in Core/Src/cal_coef.c Core/Inc/cal_coef.h STM32L431xx_FLASH.ld \
+         Core/Src/adc.c Core/Src/ads8866.c Core/Inc/ads8866.h Core/Src/sh1106.c; do
   diff -q physics_exp_test/$f nano_ammeter/$f && echo "一致 $f"
 done
 diff -rq physics_exp_test/Drivers nano_ammeter/Drivers
 ```
 
-### **故意不同**的（不是漏改，别去"同步"）
+### 修改流程
 
-| 文件 | 差异来源 |
-|---|---|
-| `Core/Src/current.c`、`Core/Inc/current.h` | `nano_ammeter` 有**模式二**（双斜率），实验固件换成了**小电流模式**；拉回相的实现也不同（实验固件搬进了 ISR 以拿到 `V_01`） |
-| `Core/Inc/cal_mode.h`、`Core/Src/cal_mode.c` | 实验固件有 `CAL_ZERO` 重写版与分段系数 |
-| `Core/Src/uart.c`、`Core/Inc/uart.h` | 实验固件多了整行缓冲（`K`/`C`/`Z`/`Q` 参数化指令要）；`nano_ammeter` 多了 `N`/`W`（底噪，实验固件已删） |
-| `Core/Src/main.c`、`Core/Src/measurement_state.c` | 指令集与结果行格式不同 |
-| `CMakeLists.txt`、`STM32L431xx_FLASH.ld` | 工程名；实验固件要留 Flash 最后一页存校准常数 |
-| `Core/Src/cal_coef.c`、`Core/Inc/cal_coef.h` | 只有实验固件有 |
+1. **在 `physics_exp_test` 里改**（它是超集），验证
+2. 改动**与 `M` 指令无关**的，**同步回 `nano_ammeter`**
+3. 同步后按上面的脚本核一遍差异 —— 应当只出现在那四行
 
-> **判断标准**：差异必须能被上面这张表解释。解释不了的就是漏改。
+> **判断标准**：差异必须只有 `M` 指令那四处。多出来的就是漏同步。
 
 ## 构建
 
