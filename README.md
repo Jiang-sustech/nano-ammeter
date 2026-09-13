@@ -262,8 +262,8 @@ python tools/nanoammeter_capture.py COM7 --no-noise --true=25.0
 python tools/make_fit_csv.py -d . -o fit_data.csv
 
 # 3. 拟合
-matlab -batch "cd('tools'); fit_constants('../fit_data.csv')"
-matlab -batch "cd('tools'); test_fit_constants"     # 自测（合成数据，无需硬件）
+bash tools/matlab_utf8.sh "cd('tools'); fit_constants('../fit_data.csv')"
+bash tools/matlab_utf8.sh "cd('tools'); test_fit_constants"   # 自测（合成数据，无需硬件）
 ```
 
 CSV 表头 `I_true,c1,c2,m,n`：已知输入电流、窗口两端原始码、POS/NEG 周期数 ——
