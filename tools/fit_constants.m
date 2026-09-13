@@ -113,12 +113,16 @@ function out = fit_constants(src, varargin)
     lev_1 = abs(M)  * range(a1);
     lev_2 = abs(b2) * range(a2);
     fprintf('\n  ---- 杠杆对比 (决定各自能被定到多准) ----\n');
-    fprintf('    端点项 M·a1  的跨度 = %8.2f pA\n', lev_1*1e12);
-    fprintf('    计数项 b2·a2 的跨度 = %8.2f pA\n', lev_2*1e12);
-    if lev_2 > 5*lev_1
-        fprintf('    -> 计数项杠杆大得多: I+/I- 定得准, M 定得差。\n');
-        fprintf('       想要准的 M(q), 用**专门的"灌已知电流"测量**(见 README),\n');
-        fprintf('       那里 Δc 能跑满整条斜坡, 杠杆比这里大一个量级。\n');
+    fprintf('    端点项 M·a1  的跨度 = %10.2f pA\n', lev_1*1e12);
+    fprintf('    计数项 b2·a2 的跨度 = %10.2f pA\n', lev_2*1e12);
+    if lev_1 > 0 && lev_2 > lev_1
+        r = lev_2 / lev_1;
+        fprintf('    -> 杠杆比 = %.0f : 1\n', r);
+        fprintf('       所以 I+/I- 比 M 定得准约 %.0f 倍 (这就是标准误那一列的来源)。\n', r);
+        fprintf('       两者通常都在可用范围。若要把 q 再压一个量级:\n');
+        fprintf('       改用**开环** —— 固定参考极性、灌已知电流、让 Δc 跑满整条斜坡,\n');
+        fprintf('       单点杠杆还能再大几倍, 重复 N 次再降 sqrt(N)。\n');
+        fprintf('       (注意: 不能靠"参考断开"来做 —— EN=0 是 Hi-Z 不是 0A)\n');
     end
 
     if cnd > 100
