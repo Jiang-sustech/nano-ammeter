@@ -162,7 +162,7 @@ static void UART_SendResultQuery(void)
     }
 
     FormatCurrentNA(MeasurementState_GetResult(), v);
-    sprintf(line, "RESULT I=%s nA MODE=%u%s\r\n", v, MeasurementState_ResultIsHard() ? 2U : 1U, (MeasurementState_ResultIsTimeout() != 0U) ? " TIMEOUT" : "");
+    sprintf(line, "RESULT I=%s nA MODE=%u%s\r\n", v, MeasurementState_ResultIsSmallI() ? 2U : 1U, (MeasurementState_ResultIsTimeout() != 0U) ? " TIMEOUT" : "");
     UART_SendString(line);
 }
 
@@ -335,6 +335,12 @@ int main(void)
           else                 { Cal_HandlePhysLine(line); }
           cmd = 0x00;
         }
+        else if (cmd == 'M')
+        {
+          /* M0/M1/M2: 手动阻塞连采 (量 tau / q 开环标定), 结果用 B / X 回传 */
+          Current_ManualLine(line);
+          cmd = 0x00;
+        }
       }
       switch (cmd)
       {
@@ -497,28 +503,30 @@ void SystemClock_Config(void)
 
 /* 测量任务: 主循环每轮调用, 非阻塞推进
  * 模式一: 每秒 1 个窗口结果, 自动上报串口并刷新屏幕;
- *         <1nA 自动切模式二 (10s 多循环) -> 出结果后自动回模式一 */
+ *         <1nA 自动切小电流模式 -> 出结果后自动回空闲
+ * 注: 结果行的 MODE= 仍是 1/2 —— 2 表示"来自 <1nA 那条支路"。
+ *     小数电流模式取代了旧的双斜率, 但字段编码不动, 免得破坏上位机解析。 */
 static void Measurement_Task(void)
 {
   MeasurementProcessResult process_result = MeasurementState_Process();
 
-  if (process_result == MEASUREMENT_MODE2_STARTED)
+  if (process_result == MEASUREMENT_SMALLI_STARTED)
   {
-    OLED_DrawScreen("+0.000", "nA", "MODE2 RUN");
-    UART_SendString("MODE2 START (I<1nA)\r\n");
+    OLED_DrawScreen("+0.000", "nA", "SMALL-I RUN");
+    UART_SendString("SMALLI START (I<1nA)\r\n");
   }
   else if (process_result == MEASUREMENT_RESULT_READY)
   {
     float current = MeasurementState_GetResult();
-    uint8_t hard = MeasurementState_ResultIsHard();
+    uint8_t smi = MeasurementState_ResultIsSmallI();
     uint8_t timeout = MeasurementState_ResultIsTimeout();
     char v[24];
 
     has_result = 1;
     FormatCurrentNA(current, v);
     UART_SendResultLine(current, MeasurementState_GetResultExt(),
-                        hard ? 2U : 1U, timeout);
-    OLED_DrawScreen(v, "nA", timeout ? "MODE2 TIMEOUT" : (hard ? "MODE:HARD" : "MODE:MEASURE"));
+                        smi ? 2U : 1U, timeout);
+    OLED_DrawScreen(v, "nA", timeout ? "SMALL-I TMO" : (smi ? "MODE:SMALLI" : "MODE:MEASURE"));
   }
 }
 

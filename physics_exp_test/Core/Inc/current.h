@@ -39,10 +39,10 @@
 #define THRESH_INT_UPPER    4.3f
 #define THRESH_INT_LOWER   (-4.3f)
 
-/* 模式二 双斜率参数 */
-#define HARD_TARGET_INT_V    2.0f       /* 上积目标 (积分器域) */
-#define HARD_TIMEOUT_MS      10000U     /* 模式二总预算 10s (多循环取平均, 约 6pA 下限) */
-#define HARD_RESET_GUARD     2000U      /* 模式二复位相最大读取次数 */
+/* 双斜率硬积分已废弃 (2026-09-13): 1pA 时上积相要 200 秒才积得起 2V, 覆盖不到
+ * pA 量程; 而且它靠 `EN=0`(Hi-Z) 做"零参考", 那个浮空节点的寄生电容会注入
+ * 一个指数衰减的暂态电荷 (实测 C_p ~5pF -> Q ~24pC)。小电流模式取而代之。
+ * HARD_* 那组宏已删 —— 全工程再无引用。 */
 
 /* Current_PullToZero 的守卫: 每次 Adc_ReadRaw() 约 8us (ADC 时钟 80MHz,
  * 采样 640.5 周期)。最坏行程 5.3V —— 从电平移位饱和轨 (±5.3V) 拉到 0V,
@@ -89,8 +89,9 @@ uint16_t Current_GetMaxCode(void);          /* 最近窗口最大码 = 上阈值
 float Current_GetSwingVoltage(void);   /* 1s 窗口内积分器电压峰峰值 (V) */
 
 /* ---- 小电流模式: 纯积分 + 斜率 (1 pA ~ 1 nA) ----
- * 模式二的双斜率在 1 pA 下需要 200 秒才积得起 2V, 覆盖不到 pA 量程;
- * 小电流直接积分、测首尾两点即可 (1pA 积 3s 才 30mV, 离轨很远)。 */
+ * 取代了原来的双斜率硬积分 —— 后者在 1 pA 下要 200 秒才积得起 2V, 覆盖不到
+ * pA 量程; 而且它靠 `EN=0` 做"零参考", 那个 Hi-Z 节点会注入暂态电荷。
+ * 小电流模式直接积分、测首尾两点即可 (1pA 积 3s 才 30mV, 离轨很远)。 */
 void Current_PullToZero(void);      /* 阻塞把积分器拉到零位 (必须在 TIM6 未跑时调用) */
 void SmallI_Start(void);            /* 阻塞复位 + 稳定 + 取起点, 然后开积分 */
 uint8_t SmallI_IsFinished(void);
@@ -100,6 +101,17 @@ float SmallI_GetCurrentExt(void);   /* ADS8866 算出的电流 (表征以它为�
 uint32_t SmallI_GetActualTicks(void); /* 实际积分拍数 (撞轨收尾时小于设定值) */
 void SmallI_SetSeconds(uint8_t sec);  /* 积分时长 (1~30 秒, 默认 3) */
 uint8_t SmallI_GetSeconds(void);
+
+/* ---- 手动模式 (串口 M 指令): 阻塞连采, 不进 TIM6 网格 ----
+ * 用途一 ****量 tau****:   M0 = 拉零后断开参考(EN=0), 录下寄生电容经 100MΩ
+ *   泄放注入的指数衰减暂态。tau = R*C_p, 注入电荷 Q = C_p*5V。
+ * 用途二 ****q 开环标定****: M1/M2 = 拉零后固定 +5V / -5V 参考, 录线性斜坡;
+ *   q = I± * T / Δc。固定极性全程不进 EN=0, 避开了上面的暂态。
+ *
+ * 采样写进模式一那两个缓冲, 完成后用现成的 B / X 指令回传 (6250 点)。
+ * 阻塞约 130ms; **只能在 IDLE 调用** (TIM6 必须停 —— Adc_ReadRaw 不可重入)。*/
+void Current_ManualRun(uint8_t sub);        /* 0=断开 / 1=+5V / 2=-5V / 3=高阻<->+5V交替 */
+void Current_ManualLine(const char *line);  /* M 指令整行解析 + 回显 */
 
 
 

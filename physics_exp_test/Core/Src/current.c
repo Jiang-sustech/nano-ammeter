@@ -5,7 +5,10 @@
 #include "tim.h"
 #include "cal_mode.h"
 #include "cal_coef.h"   /* Cal_GetQ / Cal_GetIPos / Cal_GetINeg: 可标定的物理常数 */
+#include "uart.h"       /* UART_SendString: 手动模式 (M 指令) 的回显 */
+#include "main.h"       /* DWT->CYCCNT: 实测手动模式的采样周期 */
 #include <math.h>
+#include <stdio.h>      /* sprintf */
 
 /* ---- 硬件常量 (C_INT/I_POS_REF/I_NEG_REF 已上移到 current.h 供标定模块共用) ---- */
 #define T_INT        160e-6f    /* 积分周期 (TIM6 160us) */
@@ -101,7 +104,16 @@ static volatile uint8_t sel_state;
 #define SI_RAIL_CODE       22900U       /* |Δ码| 到这儿就提前收尾 (= 3.5V,
                                          * 按标称映射 1码=152.6uV; 轨在 4.3V)。
                                          * 这是安全限, 不参与精度, 标称换算无妨 */
-#define SI_SETTLE_TICKS    8U           /* 断开参考后注入台阶的稳定拍数 */
+/* 断开参考后注入台阶的稳定等待 —— **单位是"次数", 不是 TIM6 的拍!**
+ * 这段是 TIM6 启动**之前**的阻塞循环, 每次 ReadBoth 实测约 23.6us
+ * (内置 8.2 + ADS8866 约 15), 与 160us 的节拍无关。
+ *
+ * 2026-09-13 修正: 原来是 8, 注释却写着"拍", 让人以为是 8x160us=1.28ms,
+ * 实际只有 8x23.6us = 189us —— 差 6.8 倍。
+ * 同期实测断开瞬间的暂态: 交替切换法量得 C_p ~4.9pF -> Q ~24pC,
+ * tau = R*C_p ~ 490us。需要 > 5*tau = 2.5ms。
+ * 取 128 次 (约 3.0ms, 6.2*tau), 留一倍余量。 */
+#define SI_SETTLE_TICKS    128U
 #define SI_AVG_TICKS       8U           /* 起点/终点各取多少拍平均 */
 
 static volatile uint8_t  si_active;
@@ -712,31 +724,155 @@ float   SmallI_GetCurrentExt(void) { return si_cur_ext; }
 uint32_t SmallI_GetActualTicks(void) { return last_m; }   /* 供结果行报实际积分时间 */
 
 /* ============================================================
- * 模式二: 双斜率硬积分 (电流 < 1nA)
- *  复位相: 拉回零位 (阻塞) -> 上积相: 被测电流积分到 2.0V 记 t1
- *  -> 下放相: 反向标准电流放电回零位记 t2 -> I = I_ref*t2/(t1+t2)
+ * 手动模式 (串口 M 指令) —— 阻塞式连续采样, 不走 TIM6 网格
+ *
+ *   M0  拉零 -> 断开参考(EN=0) -> 连采 -> 录指数衰减 => 量 tau = R*C_p
+ *   M1  拉零 -> 固定 +5V 参考  -> 连采 -> 录线性斜坡 => q 的开环标定
+ *   M2  拉零 -> 固定 -5V 参考  -> 连采 -> 同上, 另一极性
+ *
+ * 为什么值得单独做一个模式:
+ *
+ * (1) 采样率。TIM6 网格是 160us/点, 而 tau 预计在 ms 量级 —— 在 160us
+ *     网格上只能采到 6 点/tau, 太粗。这里在主循环里阻塞连采, 每点约 19us
+ *     (内置 ADC 8.2us + ADS8866 约 11us), 快 8 倍; 6250 点覆盖约 119ms,
+ *     够看清 tau 到 10ms 量级, 也够判"tau < 一点"这个下界。
+ *
+ * (2) q 的开环标定**必须固定参考极性**。原设计想拿"参考断开"当 0A 参考,
+ *     但 EN=0 是 Hi-Z 不是 0V: 那个浮空节点的寄生电容 C_p 会经 100MΩ 泄放,
+ *     向积分器注入一个指数衰减的暂态电荷 Q = C_p*5V (C_p=10pF 时约 3277 码,
+ *     占 50nA 积 8ms 信号的 12.5%)。固定极性则全程不进 EN=0, 完全避开。
+ *
+ * 采样直接写进 voltage_buf / voltage_buf_ext, 因此 **B / X 指令零成本回传**,
+ * 不需要写任何新的回传代码。上位机拿到波形后:
+ *   M0    -> 拟合"台阶 + 指数 + 线性漂移" -> tau 与注入电荷 Q
+ *   M1/M2 -> 拟合直线 -> 斜率即 I*q/T, 于是 q = I * T / Δc
+ *
+ * 整段阻塞约 130ms, 只在 IDLE 由主循环调用 —— 那里 TIM6 必停, 满足
+ * Adc_ReadRaw 不可重入的约束 (见 Current_PullToZero 的注释)。
  * ============================================================ */
+#define MANUAL_POINTS   TOTAL_CYCLE     /* 6250 点; 受 voltage_buf 尺寸限制 */
 
+/* 采样周期 (us)。back-to-back 跑 ReadBoth 的天然节拍约 23.6us (内置 8.2 +
+ * ADS8866 约 15), 余下的用 DWT 补齐到 MANUAL_TICK_US。
+ * 为什么要放慢: 快采时 ADS8866 的 SPI 跑得频繁, 实测噪声从模式一的 ~48 码
+ * 涨到 ~830 码 —— 怀疑是 SPI 耦合进模拟前端。放慢到 50us 可验证这一点。 */
+#define MANUAL_TICK_US      50U
+#define MANUAL_CYCLES_PER_US 80U        /* 80 MHz 主频 */
 
+/* M3 (高阻 <-> +5V 交替): 每多少点切换一次, 以及总点数。
+ * 总点数受**积分器摆幅**限制: +5V 经 100MΩ 注 50nA, 在 100pF 上是 0.5V/ms,
+ * 可用摆幅约 8.6V -> 接通的累计时间不能超约 17ms。50% 占空比下
+ * 总时长 <= 34ms, 取 400 点 (20ms, 其中接通 10ms = 5V) 留一倍余量。 */
+#define MANUAL_ALT_EVERY    50U
+#define MANUAL_M3_POINTS    400U
 
+static uint8_t  manual_sub;                     /* 最近一次子模式 (0/1/2/3) */
+static uint32_t manual_tick_ns;                 /* 实测每点周期 (ns), 供上位机建时间轴 */
+static uint32_t manual_npts;                    /* 本次实际采了多少点 */
+static uint16_t manual_first_int, manual_first_ext;   /* 第一点 = 断开/接通那一刻 */
 
-/* 多循环平均 (10s 预算内至少 1 个有效循环) */
+void Current_ManualRun(uint8_t sub)
+{
+    uint32_t i, t0, cycles, npts;
+    uint16_t ext = 0U;
 
-/* ============================================================
- * 底噪/偏置电流测量: ADG 全断 -> 纯积分 1000s,
- * 每秒 1 点存入 voltage_buf, 最小二乘拟合 dV/dt -> I_bias = C*dV/dt
- * ============================================================ */
+    /* IDLE 下 TIM6 本就没跑, 这里防御性再停一次并确保参考断开 */
+    Current_Stop();
 
+    /* ---- 复位: 拉零。Current_PullToZero() 末尾自带 ADG_Disable(),
+     *      所以 M0 要观测的"断开瞬间"就是它返回的那一刻。 ---- */
+    Current_PullToZero();
 
-/* TIM6 中断里由 Current_Process 路由调用 */
+    /* ---- 按子模式设参考状态 ----
+     * 从 PullToZero 返回到第一次采样之间要**尽量短且固定**: M0 观测的正是
+     * 那一刻注入的暂态, 间隔越长看到的衰减越靠后, 拟合出的幅度就越小。 */
+    if (sub == 1U)      { ADG_Enable(); ADG_Select_Positive(); }
+    else if (sub == 2U) { ADG_Enable(); ADG_Select_Negative(); }
+    /* sub == 0: 保持断开, 不碰 ADG */
 
+    npts = (sub == 3U) ? MANUAL_M3_POINTS : MANUAL_POINTS;
 
+    /* ---- 连续采样 (阻塞, 周期由 DWT 补齐到 MANUAL_TICK_US) ---- */
+    sample_index = 0U;
+    t0 = DWT->CYCCNT;
+    for (i = 0U; i < npts; i++)
+    {
+        uint32_t t_slot = DWT->CYCCNT;
+        uint16_t raw;
 
-/* 结果是否因压轨而不可信 (调用方应据此拒绝上报数值) */
+        /* M3: 每 MANUAL_ALT_EVERY 点在"高阻"与"+5V 接通"之间切换。
+         * 从高阻起步, 保证第一次切换是"接通"(电压正常上升), 第二次才是
+         * 我们要看的"断开 -> 注入台阶"。 */
+        if ((sub == 3U) && ((i % MANUAL_ALT_EVERY) == 0U))
+        {
+            if ((((i / MANUAL_ALT_EVERY) & 1U) == 0U))
+            {
+                ADG_Disable();                          /* 高阻 */
+            }
+            else
+            {
+                ADG_Enable();
+                ADG_Select_Positive();                  /* +5V */
+            }
+        }
 
+        raw = ReadBoth(&ext);
+        voltage_buf[i]     = raw;
+        voltage_buf_ext[i] = ext;
 
+        /* 补齐到 MANUAL_TICK_US —— DWT 忙等, 中断里不能用 HAL_Delay */
+        while ((DWT->CYCCNT - t_slot) < (MANUAL_TICK_US * MANUAL_CYCLES_PER_US))
+        {
+        }
+    }
+    cycles = DWT->CYCCNT - t0;
 
+    manual_first_int = voltage_buf[0];
+    manual_first_ext = voltage_buf_ext[0];
+    manual_sub       = sub;
+    manual_npts      = npts;
+    /* 每点周期 ns = 周期数 * 12.5ns / 点数, 写成整数式 = cycles*100/(N*8) */
+    manual_tick_ns = (uint32_t)(((uint64_t)cycles * 100ULL) /
+                                ((uint64_t)npts * 8ULL));
 
+    ADG_Disable();                  /* 采完回到"空闲不注入参考" */
+
+    /* ---- 交给 B / X 回传 ----
+     * sample_index 归零, 于是 Current_GetSampleCount() 走 last_window_count
+     * 那条分支 (IDLE 下 sample_index 恒为 0, 直接读它会回传全 0)。 */
+    sample_index      = 0U;
+    last_window_count = npts;
+    last_m = 0U;
+    last_n = 0U;
+}
+
+/* M 指令处理 (整行)。只在 IDLE 由 main.c 调用 —— 那里的闸门已保证。 */
+void Current_ManualLine(const char *line)
+{
+    char d = line[1];
+    char out[96];
+
+    if ((d != '0') && (d != '1') && (d != '2') && (d != '3'))
+    {
+        UART_SendString("MAN ERR 格式: M0(断开) / M1(+5V) / M2(-5V) / M3(高阻<->+5V交替)\r\n");
+        return;
+    }
+
+    Current_ManualRun((uint8_t)(d - '0'));
+
+    sprintf(out, "MAN DONE sub=%u N=%lu tick_ns=%lu INT1=%u EXT1=%u\r\n",
+            (unsigned)manual_sub,
+            (unsigned long)manual_npts,
+            (unsigned long)manual_tick_ns,
+            (unsigned)manual_first_int,
+            (unsigned)manual_first_ext);
+    UART_SendString(out);
+}
+
+/* 2026-09-13 清理: 这里原先挂着三段"死注释" —— "模式二 双斜率硬积分"、
+ * "底噪/偏置电流测量"、"结果是否因压轨而不可信" —— 对应的实体代码早就删了,
+ * 只剩标题悬在空中, 容易让人以为还有实现。一并清除。
+ * 双斜率废弃的理由见 current.h 顶部。 */
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
