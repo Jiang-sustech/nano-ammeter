@@ -13,8 +13,13 @@ Sequence (one shot):
 
 Writes raw_<MM_DD>_<value>nA.npz (everything) + matching .png and .log
 
-Usage: python nanoammeter_capture.py [PORT] [--no-noise]
+Usage: python nanoammeter_capture.py [PORT] [--no-noise] [--true=<nA>]
        python nanoammeter_capture.py --replot [FILE.npz]
+
+--true=<nA>: 记下**本次输入电流的已知真值**(单位 nA), 存进 npz 的 true_na。
+        做物理常数拟合时, 这些真值就是最小二乘的因变量 —— 不记的话事后得靠
+        文件名去对, 很容易错位。注意必须写成等号形式: `--true=-40` (写成
+        `--true -40` 的话那个 -40 会被位置解析当成端口名)。
 
 --no-noise: 跳过 N/W 两步。physics_exp_test 已删除底噪指令 (见该工程
 README「两个工程的分工」), 对着它跑不加这个开关会在第 7 步干等 90 秒后抛
@@ -37,8 +42,21 @@ BAUD = 115200
 CODE_ZERO = 30787          # 1.55 V level-shift zero, internal code domain
 RAIL_HI = 65520            # measured positive rail of the internal ADC path
 
+
+def _opt_float(name):
+    """取 `--name=<值>`; 没给返回 None。
+
+    开关一律用**等号形式**。写成 `--true -40` 的话, 那个 -40 会被位置参数
+    解析当成端口名 —— 负数开头的值必须黏在等号右边。"""
+    for a in sys.argv[1:]:
+        if a.startswith(name + "="):
+            return float(a[len(name) + 1:])
+    return None
+
+
 # 位置参数只有一个 (端口), 其余是开关 —— 开关不能顶到 PORT 的位置上
 DO_NOISE = "--no-noise" not in sys.argv
+TRUE_NA = _opt_float("--true")      # 本次输入电流的**已知真值** (nA), 拟合用
 _rest = [a for a in sys.argv[1:] if not a.startswith("--")]
 PORT = _rest[0] if _rest else "COM7"
 
@@ -249,6 +267,7 @@ def main():
         result_timeout=(bool(m.group("timeout")) if m else False),
         timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
         port=PORT,
+        true_na=(TRUE_NA if TRUE_NA is not None else np.nan),
         **raw_fields(m),
     )
 

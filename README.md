@@ -248,17 +248,27 @@ I = q·(c2 − c1)/T窗 − (m·I₊ + n·I₋)/N
 
 ### `fit_constants.m`：一次拟合三个物理常数
 
-把式(6) 的三个常数 **`M`（含电平移位增益的等效电容）、`I₊`、`I₋`** 一起拟合出来：
+> 📖 **第一次用 MATLAB？看 [docs/拟合操作指南.md](docs/拟合操作指南.md)** ——
+> 从采数据到把结果发给固件，逐步写清，面向初学者。
 
-```
-输入 CSV 表头: I_true,c1,c2,m,n
-  I_true  已知输入电流 (A)        <- 独立标准
-  c1, c2  窗口两端原始码          <- 结果行 RAW 段的 INT1/INT2（或 EXT1/EXT2）
-  m, n    POS/NEG 周期数          <- 同一个 RAW 段
+把式(6) 的三个常数 **`M`（含电平移位增益的等效电容）、`I₊`、`I₋`** 一起拟合出来。
+整条链路：
 
-matlab -batch "cd('tools'); fit_constants('data.csv')"
-matlab -batch "cd('tools'); test_fit_constants"     # 自测（合成数据）
+```bash
+# 1. 对每个已知电流采一次（--true= 记下这次输入的真值，单位 nA）
+python tools/nanoammeter_capture.py COM7 --no-noise --true=25.0
+
+# 2. 把所有 npz 汇总成 CSV（自动配对，不要手工抄）
+python tools/make_fit_csv.py -d . -o fit_data.csv
+
+# 3. 拟合
+matlab -batch "cd('tools'); fit_constants('../fit_data.csv')"
+matlab -batch "cd('tools'); test_fit_constants"     # 自测（合成数据，无需硬件）
 ```
+
+CSV 表头 `I_true,c1,c2,m,n`：已知输入电流、窗口两端原始码、POS/NEG 周期数 ——
+后四个都直接从结果行 `RAW` 段来。**已知电流必须 ≥ 1 nA**（式(6) 是模式一的公式，
+低于 1 nA 会切小电流模式，不出 `RAW` 段）。
 
 > **不要按 `I₊`/`I₋` 各一列去拟合** —— `m/(m+n)` 与 `n/(m+n)` 恒有"两列之和 = 1"，
 > 高度共线、方差被放大。脚本用等价重参数化（`M`、常数项、`a₂` 三列）绕开，
