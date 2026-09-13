@@ -120,14 +120,22 @@ def apply(d, r_):
 
 def handshake():
     """发 0x7F (8E1) 等 0x79"""
-    s.reset_input_buffer()
-    for _ in range(PROBE_TRIES):
-        s.write(b'\x7f')
-        r_ = s.read(1)
-        if r_ and r_[0] == 0x79:
-            return True
-        time.sleep(PROBE_GAP)
-    return False
+    # 超时必须临时调小: 端口默认 timeout=1.0s, 每次 read(1) 会**阻塞满 1 秒**
+    # 才返回空, 于是 30 次重试要 30 秒 (而不是 PROBE_GAP 暗示的 1.5 秒),
+    # --sweep 七组序列就要等三分半才看到"按 SW1"的提示。
+    old_to = s.timeout
+    s.timeout = PROBE_GAP
+    try:
+        s.reset_input_buffer()
+        for _ in range(PROBE_TRIES):
+            s.write(b'\x7f')
+            r_ = s.read(1)
+            if r_ and r_[0] == 0x79:
+                return True
+            time.sleep(PROBE_GAP)
+        return False
+    finally:
+        s.timeout = old_to
 
 
 def try_enter(label, phases):
@@ -270,7 +278,9 @@ r = s.read(1)
 if not r or r[0] != 0x79:
     print('读长度 ACK 失败'); sys.exit(1)
 back = s.read(N + 1)
-ok = back == data[:len(back)]
+# 先比长度再比内容 —— 否则短包会跟"同样短的前缀"相等而报 OK,
+# 一次被截断的回读就此通过验证 (固件短写/线缆问题就查不出来了)
+ok = (len(back) == N + 1) and (back == data[:N + 1])
 print(f'回读首 {len(back)} 字节: {"一致 OK" if ok else "不一致 FAIL"}')
 if not ok:
     print('期望:', data[:len(back)].hex(' '))

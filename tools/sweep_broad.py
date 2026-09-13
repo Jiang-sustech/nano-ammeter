@@ -110,12 +110,14 @@ def main():
     print("已写", a.out, "(%d 行)" % len(rows))
 
     # ---- 每点汇总 ----
-    xs, ys, es, modes = [], [], [], []
+    xs, ys, es, modes, pts_have = [], [], [], [], []
     for pA in pts_pA:
         g = [r for r in rows if r['set_pA'] == pA and 'true_nA' in r]
         if not g:
             continue
-        xs.append(g[0]['true_nA']); ys.append(g[0]['dev_avg_nA'])
+        pts_have.append(pA)          # 只记**有数据**的点 —— 下面 zip 要用它,
+        xs.append(g[0]['true_nA'])   # 用完整的 pts_pA 去 zip 会让有点缺数据时
+        ys.append(g[0]['dev_avg_nA'])  # 整张逐点表的"设定"列错位到下一个点上
         es.append(g[0]['err_pct']); modes.append(g[0]['mode'])
 
     if len(xs) < 2:
@@ -146,7 +148,9 @@ def main():
 
     # ---- 回归②: 相对误差 vs log10(电流) ----
     import math
-    lx = [math.log10(abs(x) * 1e9) for x in xs]      # x 是 nA -> pA 取对数
+    lx = [math.log10(abs(x) * 1e3) for x in xs]      # xs 是 nA -> pA 是 1e3
+    #   ↑ 原来写的 1e9, 整体偏大 6。K 是中心化协方差不受影响, 但
+    #     M = mean(es) - K*ml 会偏 -6K, 而 M 是要写进 reg.txt 报出去的。
     ml = sum(lx) / n
     sl = sum((v - ml) ** 2 for v in lx)
     sl_e = sum((v - ml) * (e - sum(es) / n) for v, e in zip(lx, es))
@@ -159,7 +163,7 @@ def main():
     lines.append("")
     lines.append("逐点:")
     lines.append("  %12s %14s %14s %10s %6s" % ("设定(pA)", "真值(nA)", "读数(nA)", "误差%", "MODE"))
-    for pA, x, y, e, m in zip(pts_pA, xs, ys, es, modes):
+    for pA, x, y, e, m in zip(pts_have, xs, ys, es, modes):
         lines.append("  %12.4g %14.6f %14.6f %+10.3f %6d" % (pA, x, y, e, m))
 
     reg_out = a.out.replace('.csv', '_reg.txt')

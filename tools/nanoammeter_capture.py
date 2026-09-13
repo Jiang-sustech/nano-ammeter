@@ -79,6 +79,11 @@ RESULT_RE = re.compile(
     r" MODE=(?P<mode>[0-9])"
     r"(?: T=(?P<t>[0-9]+)ms)?"
     r"(?P<timeout> TIMEOUT)?"
+    # CAL= 必须显式吃掉: 固件发的是 "...T=1000ms CAL=+40.235 RAW m=..." ——
+    # 而 TIMEOUT/RAW 那两组都是可选的, 中间插一个 CAL= 会让正则在它前面就收尾,
+    # 结果是"匹配成功但六个 RAW 字段全是 None"。CAL= 一旦写过 Q/K 就恒存在
+    # (Z 清除也会把 a=1,b=0 存回 Flash 并保留 magic), 所以这不是边界而是常态。
+    r"(?: CAL=(?P<cal>[+-]?[0-9]+\.[0-9]+))?"
     r"(?: RAW m=(?P<m>[0-9]+) n=(?P<n>[0-9]+)"
     r" INT1=(?P<int1>[0-9]+) INT2=(?P<int2>[0-9]+)"
     r" EXT1=(?P<ext1>[0-9]+) EXT2=(?P<ext2>[0-9]+))?")
@@ -315,10 +320,29 @@ def main():
         f.write("\n".join(TRANSCRIPT) + "\n")
 
     print("\n>>> wrote %s  (+ .log)" % path)
-    plot_only(wi, we, ns, path)
+    plot_only(wi, we, ns, path, dt_us_of(result_line, len(wi)))
 
 
-def plot_only(wi, we, ns, path="nanoammeter_data.npz"):
+def dt_us_of(result_line, npts):
+    """每点代表多少微秒 —— 由结果行的 T= 除以点数反推。
+
+    不能硬编码 160: MODE=1 (1s 窗口) 是 160us/点, 而 MODE=2 (10s 长窗口) 的
+    缓冲是**抽点**存的 —— 6250 点覆盖 62500 拍, 每点 1600us。硬编码会让锯齿
+    周期和整条横轴差 10 倍, 而那个数是当测量结果打印出来的。
+    结果行的 T= 报的是窗口实际拍数的时长, 所以 T/npts 就是每点时长。
+    """
+    m = RESULT_RE.search(result_line or "")
+    if (not m) or (not m.group("t")) or (npts <= 0):
+        return 160.0                    # 老格式没有 T=, 只能按名义值
+    return float(m.group("t")) * 1000.0 / npts
+
+
+def plot_only(wi, we, ns, path="nanoammeter_data.npz", dt_us=160.0):
+    """dt_us = 每**点**代表多少微秒。
+
+    **不能硬编码 160**: 10 s 长窗口 (MODE=2) 下缓冲是抽点存的 —— 6250 点覆盖
+    62500 拍, 每点是 1600us 而不是 160us。硬编码会让锯齿周期和整条横轴差 10 倍,
+    而且那个数是当测量结果打印出来的。由调用方按 result_time_ms/点数 反推。"""
     print("\n=== data summary ===")
     stats("WAVE", wi)
     stats("WAVEX", we)
@@ -355,8 +379,8 @@ def plot_only(wi, we, ns, path="nanoammeter_data.npz"):
     edges = rising_edges(wi, CODE_ZERO)
     if len(edges) > 1:
         per = np.diff(edges)
-        print("     WAVE rising edges=%d  avg period=%.1f ticks (%.2f ms)"
-              % (len(edges), per.mean(), per.mean() * 0.160))
+        print("     WAVE rising edges=%d  avg period=%.1f pts (%.2f ms)"
+              % (len(edges), per.mean(), per.mean() * dt_us / 1000.0))
 
     # ---------------- plot ----------------
     fig, ax = plt.subplots(3 if has_noise else 2, 1,
@@ -369,7 +393,8 @@ def plot_only(wi, we, ns, path="nanoammeter_data.npz"):
                    label="ADS8866 16-bit (observation path)")
     ax[0].axhline(CODE_ZERO, color="gray", ls=":", lw=0.8)
     ax[0].set_title("Mode-1 charge-balancing window: two acquisition paths, same node")
-    ax[0].set_xlabel("tick index (160 us/tick)")
+    ax[0].set_xlabel("sample index (%.2f us/sample%s)"
+                     % (dt_us, ", MODE=2 长窗口抽点" if dt_us > 200 else ""))
     ax[0].set_ylabel("raw code (16-bit domain)")
     ax[0].legend(loc="upper right", fontsize=8)
     ax[0].grid(alpha=0.3)
@@ -417,6 +442,8 @@ if __name__ == "__main__":
             src = cand[-1]
         print("replot: %s" % src)
         z = np.load(src)
-        plot_only(z["wave_int"], z["wave_ext"], z["noise"], src)
+        _rl = str(z["result_line"]) if "result_line" in z else ""
+        plot_only(z["wave_int"], z["wave_ext"], z["noise"], src,
+                  dt_us_of(_rl, len(z["wave_int"])))
     else:
         main()

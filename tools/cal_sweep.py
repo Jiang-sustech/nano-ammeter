@@ -58,6 +58,10 @@ RESULT_RE = re.compile(
     r" MODE=(?P<mode>[0-9])"
     r"(?: T=(?P<t>[0-9]+)ms)?"
     r"(?P<timeout> TIMEOUT)?"
+    # CAL= 必须显式吃掉 —— 见 nanoammeter_capture.py 里同一处的长注释:
+    # 固件发 "...T=1000ms CAL=+40.235 RAW m=...", 漏了这一段就会匹配成功但
+    # RAW 六字段全 None, 整轮标定静默产出空表。
+    r"(?: CAL=(?P<cal>[+-]?[0-9]+\.[0-9]+))?"
     r"(?: RAW m=(?P<m>[0-9]+) n=(?P<n>[0-9]+)"
     r" INT1=(?P<int1>[0-9]+) INT2=(?P<int2>[0-9]+)"
     r" EXT1=(?P<ext1>[0-9]+) EXT2=(?P<ext2>[0-9]+))?")
@@ -137,7 +141,13 @@ class ReadbackSampler(threading.Thread):
 
     def stop(self, want=READBACK_N):
         self._stop = True
-        self.join(timeout=2.0)
+        # join 超时必须**大于** pyvisa 自身的 timeout (smu_open 里设的 5000ms),
+        # 否则线程可能还卡在一次 query 里就被放走 —— 下一轮又 start 一个新线程,
+        # 两个线程同时往同一个 raw socket 发查询 (pyvisa-py 的 socket 不可重入)。
+        self.join(timeout=8.0)
+        if self.is_alive():
+            raise RuntimeError("回读采样线程没能在 8s 内退出 —— pyvisa 卡住了, "
+                               "后续会与它并发访问同一资源, 已中止")
         if len(self.vals) <= want:
             return list(self.vals)
         # 等间隔抽 want 个 —— 让采样在时间上均匀覆盖整段窗口
@@ -210,12 +220,18 @@ def main():
             for k in range(a.n):
                 smp = ReadbackSampler(smu)
                 smp.start()
-                d = board_measure(ser)
-                picked = smp.stop(READBACK_N)
-                rb_all += picked
+                try:
+                    d = board_measure(ser)
+                finally:
+                    picked = smp.stop(READBACK_N)   # 无论如何都要把线程停干净
 
                 if d is None:
-                    print("    第%d次: ** 装置无响应/超时 **" % (k + 1)); continue
+                    # **这次装置没应答, 那 10 个回读不能计入 I_true** ——
+                    # 需求要的是"装置正在测的那段时间里的回读", 出错的这次根本
+                    # 没在测。源稳时无所谓, 源在漂时会静默稀释标准值。
+                    print("    第%d次: ** 装置无响应/超时 ** (本次回读不计入)" % (k + 1))
+                    continue
+                rb_all += picked
                 iread = float(d['i'])
                 dev_vals.append(iread)
                 print("    第%d次  装置 %+9.4f nA (MODE=%s T=%sms)   回读采了 %d 个   %s"
@@ -251,6 +267,12 @@ def main():
         ser.close()
 
     # ---- 写两样东西: 原始记录 + fit_constants.m 要的 CSV ----
+    if not rows:
+        # 全军覆没时 rows 是空的, 再往下走会在 rows[0] 上 IndexError ——
+        # 那样看到的是一个莫名其妙的 traceback, 而不是"没有数据"这个事实
+        print("\n** 一次有效测量都没有, 不写文件 **")
+        return
+
     import os
     os.makedirs(os.path.dirname(a.out) or '.', exist_ok=True)
     raw_out = a.out.replace('.csv', '_raw.csv')

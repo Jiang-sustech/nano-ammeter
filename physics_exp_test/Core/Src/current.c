@@ -512,9 +512,16 @@ uint32_t Current_GetNCount(void)
 uint16_t Current_GetMinCode(void)
 {
     uint16_t vmin = 0xFFFFU;
-    uint32_t i;
+    uint32_t i, n;
 
-    for (i = 0U; i < TOTAL_CYCLE; i++)
+    /* 用 Current_GetSampleCount() 而不是 TOTAL_CYCLE —— 缓冲未必填满:
+     * 长窗口下是**抽点**存的(6250 点覆盖 62500 拍), M3 手动模式只填 400 点,
+     * 其余格子是**上一个窗口的残留**。按 TOTAL_CYCLE 扫会返回过期极值。
+     * 注: 长窗口下这个极值只是抽点子集上的**估计** —— 抽点间隔 10 拍, 而
+     * dV/拍 = I/C*T = 50nA/100pF*160us = 0.08V, 最多偏离真切换点 9 拍 ~0.7V
+     * (摆幅 8.6V 的 8%)。 */
+    n = Current_GetSampleCount();
+    for (i = 0U; i < n; i++)
     {
         if (voltage_buf[i] < vmin)
         {
@@ -527,9 +534,11 @@ uint16_t Current_GetMinCode(void)
 uint16_t Current_GetMaxCode(void)
 {
     uint16_t vmax = 0U;
-    uint32_t i;
+    uint32_t i, n;
 
-    for (i = 0U; i < TOTAL_CYCLE; i++)
+    /* 同 GetMinCode: 必须用 Current_GetSampleCount() (缓冲未必填满, 见那里的注释) */
+    n = Current_GetSampleCount();
+    for (i = 0U; i < n; i++)
     {
         if (voltage_buf[i] > vmax)
         {

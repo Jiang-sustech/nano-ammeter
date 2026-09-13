@@ -32,6 +32,7 @@
 """
 import argparse
 import csv
+import math
 import os
 import sys
 import time
@@ -233,6 +234,7 @@ def main():
     print("=" * 70)
     print("%10s %10s %14s %14s %10s" % ("峰值(nA)", "占空比", "脉冲读数(nA)", "直流读数(nA)", "差(%)"))
     worst = 0.0
+    bad = False
     for i_peak, duty, _ in KEY_POINTS:
         p = [r['dev_nA'] for r in rows if r['peak_nA'] == i_peak and r['kind'] == 'pulse']
         d = [r['dev_nA'] for r in rows if r['peak_nA'] == i_peak and r['kind'] == 'dc']
@@ -240,11 +242,21 @@ def main():
             print("%10.4g %10.2f %14s %14s %10s" % (i_peak, duty, "-", "-", "-")); continue
         pa, da = sum(p) / len(p), sum(d) / len(d)
         dd = (pa - da) / da * 100 if da else float('nan')
-        worst = max(worst, abs(dd))
-        print("%10.4g %10.2f %14.5f %14.5f %+10.3f" % (i_peak, duty, pa, da, dd))
+        # 差值是 nan 时**不能**走 max(worst, ...) —— Python 的 max(0.0, nan)
+        # 返回 0.0 (nan > 0.0 为 False), worst 原封不动, 于是表里是 nan 而
+        # 结论行照样打印"通过"。必须显式标记失败。
+        if math.isfinite(dd):
+            worst = max(worst, abs(dd))
+        else:
+            bad = True
+        print("%10.4g %10.2f %14.5f %14.5f %+10.3f%s"
+              % (i_peak, duty, pa, da, dd, "" if math.isfinite(dd) else "  **差值无效**"))
     print()
-    print("最大 |差| = %.3f %%   (判据 < 0.5%%)  -> %s"
-          % (worst, "通过" if worst < 0.5 else "**未通过 / 见下方局限**"))
+    if bad:
+        print("** 有点的差值算不出来 (直流读数分母为 0 或缺数据) —— 判据不成立, 不能算通过 **")
+    else:
+        print("最大 |差| = %.3f %%   (判据 < 0.5%%)  -> %s"
+              % (worst, "通过" if worst < 0.5 else "**未通过 / 见下方局限**"))
     if a.pc_chop:
         print()
         print("注意: 本次用 --pc-chop, 占空比精度受 PC 调度抖动限制 (ton=%.0fms 上约 %.1f%%),"

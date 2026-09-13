@@ -28,6 +28,7 @@
 """
 import argparse
 import csv
+import math
 import sys
 import time
 
@@ -209,7 +210,10 @@ def main():
 
                 std = (pre + post) / 2.0
                 drift = abs(post - pre) / abs(std) * 100 if std else float('nan')
-                usable = drift <= args.drift_limit
+                # usable 只看**源表漂移**是不够的: 装置超时时 board_measure 返回
+                # nan, 而 drift 可能照样很小 -> 那条 nan 会进汇总均值, 把整行
+                # 变成 nan。所以必须同时要求装置读数是个有限的数。
+                usable = (drift <= args.drift_limit) and math.isfinite(i_int)
                 err = (i_int - std) / std * 100 if std else float('nan')
 
                 print("  第%d次  源前 %.5f nA(±%.5f, n=%d)  源后 %.5f nA  "
