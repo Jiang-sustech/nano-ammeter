@@ -64,11 +64,22 @@ void Current_Start(void);
 extern volatile uint32_t precond_timeout;
 void Current_Stop(void);               /* 停止: 停 TIM6 + 关 ADG (空闲不注入参考) */
 void Current_Process(void);            /* TIM6 中断每 160us 调用一次 */
-/* 式(6), 指定用哪一路缓冲。v_first = 该路的窗口起点码 (拉回相最后一拍),
- * 由 Current_GetFirstCode() / Current_GetFirstCodeExt() 给 */
-float Calculate_Current_From(const uint16_t *buf, uint16_t v_first);
+/* 式(6) —— **全量程唯一的结果计算函数**。
+ * 只看窗口的首尾两个码, 分母是 m+n (计数), 所以对 1s 和 10s 窗口同样成立。
+ * 端点码由 Current_GetFirstCode()* 与 Current_GetLastCode()* 给。
+ * 内部读全局 m_count/n_count —— 只能在窗口封存后调用。 */
+float Calculate_Current_From(uint16_t c_first, uint16_t c_last);
 uint16_t Current_GetFirstCode(void);     /* 窗口起点 V_01 (内置路) */
 uint16_t Current_GetFirstCodeExt(void);  /* 窗口起点 V_01 (外部路) */
+uint16_t Current_GetLastCode(void);      /* 窗口最后一拍 (内置路) */
+uint16_t Current_GetLastCodeExt(void);   /* 窗口最后一拍 (外部路) */
+/* 窗口长度 (拍)。短 6250 拍 = 1s, 长 62500 拍 = 10s。
+ * Current_SetWindowTicks() 必须在 Current_Start() **之前**调用 (Start 按它算抽点)。*/
+#define CURRENT_WIN_SHORT_TICKS   6250U     /* 1 s  —— |I| >= 1 nA */
+#define CURRENT_WIN_LONG_TICKS    62500U    /* 10 s —— |I| <  1 nA, 靠时间换信噪比 */
+void Current_SetWindowTicks(uint32_t ticks);
+uint32_t Current_GetWindowTicks(void);      /* 最近窗口的**实际拍数** (结果行 T= 用它) */
+uint32_t Current_GetWindowTicksCfg(void);   /* 当前配置值 (尚未跑窗口时用) */
 float Current_GetWindowResultExt(void); /* 同一窗口由 ADS8866 算出的结果 */
 uint8_t Current_WindowFinished(void);  /* 窗口完成脉冲 (每秒一次, 消费式) */
 void Current_ClearWindowFlag(void);
@@ -88,19 +99,14 @@ uint16_t Current_GetMinCode(void);          /* 最近窗口最小码 = 下阈值
 uint16_t Current_GetMaxCode(void);          /* 最近窗口最大码 = 上阈值切换点 (标定用) */
 float Current_GetSwingVoltage(void);   /* 1s 窗口内积分器电压峰峰值 (V) */
 
-/* ---- 小电流模式: 纯积分 + 斜率 (1 pA ~ 1 nA) ----
- * 取代了原来的双斜率硬积分 —— 后者在 1 pA 下要 200 秒才积得起 2V, 覆盖不到
- * pA 量程; 而且它靠 `EN=0` 做"零参考", 那个 Hi-Z 节点会注入暂态电荷。
- * 小电流模式直接积分、测首尾两点即可 (1pA 积 3s 才 30mV, 离轨很远)。 */
-void Current_PullToZero(void);      /* 阻塞把积分器拉到零位 (必须在 TIM6 未跑时调用) */
-void SmallI_Start(void);            /* 阻塞复位 + 稳定 + 取起点, 然后开积分 */
-uint8_t SmallI_IsFinished(void);
-uint8_t SmallI_IsShort(void);       /* 撞轨提前收尾 (结果有效, 但积分时间短了) */
-float SmallI_GetCurrentInt(void);   /* 内置 ADC 算出的电流 */
-float SmallI_GetCurrentExt(void);   /* ADS8866 算出的电流 (表征以它为准) */
-uint32_t SmallI_GetActualTicks(void); /* 实际积分拍数 (撞轨收尾时小于设定值) */
-void SmallI_SetSeconds(uint8_t sec);  /* 积分时长 (1~30 秒, 默认 3) */
-uint8_t SmallI_GetSeconds(void);
+/* ---- 积分器复位 (阻塞) ----
+ * 把积分器拉到零位。**必须在 TIM6 未跑时调用** —— Adc_ReadRaw 不可重入,
+ * 不能与 ISR 里的转换并发。
+ *
+ * 注: 测量窗口不用这个 —— 它的拉回相在 ISR 里 (Precond_Tick), 因为要拿
+ * "拉回的最后一拍"当窗口起点 V_01, 必须在同一套节拍网格上。这个阻塞版是
+ * 给 CAL_ZERO 与手动模式 (M) 用的。 */
+void Current_PullToZero(void);
 
 /* ---- 手动模式 (串口 M 指令): 阻塞连采, 不进 TIM6 网格 ----
  * 用途一 ****量 tau****:   M0 = 拉零后断开参考(EN=0), 录下寄生电容经 100MΩ

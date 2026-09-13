@@ -98,7 +98,8 @@ static void FormatCurrentNA(float current, char *buf)
  * 就丢了 —— 而 (m+n) 与 (m+n-1) 两种分母之争、以及分段系数 a/b 的拟合,
  * 都得从**同一次测量**的原始量出发, 不然只能靠反推。报告的表 4-9~4-14 也用得上。
  *
- * 仅 MODE=1 (电荷平衡窗口) 出这一段: 小电流模式不算 m/n, 用的是起点/终点
+ * 两种窗口 (MODE=1 的 1s / MODE=2 的 10s) 都出这一段 —— 它们是同一条测量
+ * 逻辑, 只是窗口长度不同 (2026-09-13 重构前, MODE=2 是另一套不算 m/n 的模式)
  * 两段平均, 原始量是另一套 (结果行的 T= 已经给了它的实际积分拍数)。 */
 static void UART_SendResultLine(float cur_int, float cur_ext, uint8_t mode,
                                 uint8_t timeout)
@@ -112,20 +113,26 @@ static void UART_SendResultLine(float cur_int, float cur_ext, uint8_t mode,
     FormatCurrentNA(cur_int, vi);
     FormatCurrentNA(cur_ext, vx);
 
-    if (mode == 1U)
+    /* MODE=1 (1s 窗口) 与 MODE=2 (10s 长窗口) 是**同一条测量逻辑**, 都出 RAW 段。
+     * 2026-09-13 重构前这里是 `mode == 1U` —— 那时 MODE=2 是另一套不算 m/n 的模式;
+     * 现在留着会把长窗口的 RAW 整段跳掉。 */
+    if ((mode == 1U) || (mode == 2U))
     {
         uint32_t npt = Current_GetSampleCount();
 
         if (npt > 0U)                /* 没采到样就不出, 免得报一堆 0 */
         {
+            /* 端点必须用 Current_GetLastCode() 而不是缓冲末点 ——
+             * 长窗口的缓冲是**抽点**存的 (10 拍存 1 点), 末点离真正的窗口末拍差
+             * 9 拍。在锯齿波上那 9 拍 (1.4ms) 能差好几千码, 拿它复算结果会对不上。 */
             snprintf(raw, sizeof(raw),
                      " RAW m=%lu n=%lu INT1=%u INT2=%u EXT1=%u EXT2=%u",
                      (unsigned long)Current_GetMCount(),
                      (unsigned long)Current_GetNCount(),
                      (unsigned)Current_GetFirstCode(),
-                     (unsigned)Current_GetSample(npt - 1U),
+                     (unsigned)Current_GetLastCode(),
                      (unsigned)Current_GetFirstCodeExt(),
-                     (unsigned)Current_GetExtSample(npt - 1U));
+                     (unsigned)Current_GetLastCodeExt());
         }
     }
 
@@ -162,7 +169,7 @@ static void UART_SendResultQuery(void)
     }
 
     FormatCurrentNA(MeasurementState_GetResult(), v);
-    sprintf(line, "RESULT I=%s nA MODE=%u%s\r\n", v, MeasurementState_ResultIsSmallI() ? 2U : 1U, (MeasurementState_ResultIsTimeout() != 0U) ? " TIMEOUT" : "");
+    sprintf(line, "RESULT I=%s nA MODE=%u%s\r\n", v, MeasurementState_ResultIsLongW() ? 2U : 1U, (MeasurementState_ResultIsTimeout() != 0U) ? " TIMEOUT" : "");
     UART_SendString(line);
 }
 
@@ -314,7 +321,7 @@ int main(void)
        *   K<段>,<a_ppm>,<b_fA> 写入分段系数        Z 清除分段系数
        *   Q                    查询物理常数 q/I+/I-
        *   Q<q_aC>,<i+_pA>,<i-_pA>  写入物理常数
-       *   T<秒>                小电流模式积分时长 */
+       *   T<秒>                本次窗口的实际时长 (1s, 或 <1nA 时换的 10s) */
       /* 物理常数与分段系数分成两组指令: 前者是仪器的实测属性, 后者是拟合出来的
        * 修正; 混在一起会让人以为 Z 会把标定好的 q 一起清掉 */
       /* 整行接收: 参数化指令 (K/C/Z) 需要整行; 单字符指令走同一个缓冲,
@@ -502,31 +509,31 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 
 /* 测量任务: 主循环每轮调用, 非阻塞推进
- * 模式一: 每秒 1 个窗口结果, 自动上报串口并刷新屏幕;
- *         <1nA 自动切小电流模式 -> 出结果后自动回空闲
- * 注: 结果行的 MODE= 仍是 1/2 —— 2 表示"来自 <1nA 那条支路"。
- *     小数电流模式取代了旧的双斜率, 但字段编码不动, 免得破坏上位机解析。 */
+ * 一次测量 = 1s 窗口; 若 |I|<1nA 自动换 10s 窗口重测一次, 然后出结果。
+ * 注: 结果行的 MODE= 仍是 1/2 —— 2 表示"用的是 10s 长窗口"。
+ *     两条路现在是**同一个公式**, MODE 只是告诉上位机窗口长度不同
+ *     (顺带: 长窗口也会出 RAW 段了, 不像原来那个独立的小电流模式)。 */
 static void Measurement_Task(void)
 {
   MeasurementProcessResult process_result = MeasurementState_Process();
 
-  if (process_result == MEASUREMENT_SMALLI_STARTED)
+  if (process_result == MEASUREMENT_LONGW_STARTED)
   {
-    OLED_DrawScreen("+0.000", "nA", "SMALL-I RUN");
-    UART_SendString("SMALLI START (I<1nA)\r\n");
+    OLED_DrawScreen("+0.000", "nA", "LONG WIN 10s");
+    UART_SendString("LONGW START (I<1nA, 10s window)\r\n");
   }
   else if (process_result == MEASUREMENT_RESULT_READY)
   {
     float current = MeasurementState_GetResult();
-    uint8_t smi = MeasurementState_ResultIsSmallI();
+    uint8_t longw = MeasurementState_ResultIsLongW();
     uint8_t timeout = MeasurementState_ResultIsTimeout();
     char v[24];
 
     has_result = 1;
     FormatCurrentNA(current, v);
     UART_SendResultLine(current, MeasurementState_GetResultExt(),
-                        smi ? 2U : 1U, timeout);
-    OLED_DrawScreen(v, "nA", timeout ? "SMALL-I TMO" : (smi ? "MODE:SMALLI" : "MODE:MEASURE"));
+                        longw ? 2U : 1U, timeout);
+    OLED_DrawScreen(v, "nA", timeout ? "LONGW TMO" : (longw ? "MODE:10s" : "MODE:MEASURE"));
   }
 }
 

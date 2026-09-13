@@ -23,7 +23,8 @@
 /* ---- 模式一 状态 ---- */
 static uint16_t voltage_buf[TOTAL_CYCLE];   /* 1 秒全部采样原始码, 12.5KB */
 static uint32_t sample_index;
-static uint32_t last_window_count;          /* 最近一个完整窗口的采样数 (单次测量完成后 B 指令取数用) */
+static uint32_t last_window_count;          /* 最近一个完整窗口**存入缓冲**的点数 (抽点后, B 指令取数用) */
+static volatile uint32_t last_window_ticks; /* 最近一个完整窗口的**实际拍数** (= m+n, 结果行的 T= 用它) */
 static uint32_t last_m, last_n;             /* 最近完整窗口的 POS/NEG 周期数 (标定用) */
 static uint32_t m_count;                    /* POS(升压方向) 施加周期数 */
 static uint32_t n_count;                    /* NEG(降压方向) 施加周期数 */
@@ -97,42 +98,32 @@ static volatile uint8_t sel_state;
 
 
 
-/* ---- 小电流模式 (纯积分 + 斜率) 的参数与状态 ---- */
-#define SI_TICKS_PER_SEC   6250U        /* TIM6 160us -> 1s */
-#define SI_DEFAULT_SEC     3U
-#define SI_MAX_SEC         30U
-#define SI_RAIL_CODE       22900U       /* |Δ码| 到这儿就提前收尾 (= 3.5V,
-                                         * 按标称映射 1码=152.6uV; 轨在 4.3V)。
-                                         * 这是安全限, 不参与精度, 标称换算无妨 */
-/* 断开参考后注入台阶的稳定等待 —— **单位是"次数", 不是 TIM6 的拍!**
- * 这段是 TIM6 启动**之前**的阻塞循环, 每次 ReadBoth 实测约 23.6us
- * (内置 8.2 + ADS8866 约 15), 与 160us 的节拍无关。
+/* ---- 测量窗口 (2026-09-13 统一为一条路) ----
  *
- * 2026-09-13 修正: 原来是 8, 注释却写着"拍", 让人以为是 8x160us=1.28ms,
- * 实际只有 8x23.6us = 189us —— 差 6.8 倍。
- * 同期实测断开瞬间的暂态: 交替切换法量得 C_p ~4.9pF -> Q ~24pC,
- * tau = R*C_p ~ 490us。需要 > 5*tau = 2.5ms。
- * 取 128 次 (约 3.0ms, 6.2*tau), 留一倍余量。 */
-#define SI_SETTLE_TICKS    128U
-#define SI_AVG_TICKS       8U           /* 起点/终点各取多少拍平均 */
+ * 全量程只有**一套**测量逻辑: 参考在 ±I_ref 之间 bang-bang, 窗口结束时用
+ *
+ *     I = q·Δc/(N·T)  -  (m·I₊ + n·I₋)/N
+ *
+ * 算结果 —— 这个式子本来就与窗口长度无关 (分母是 m+n, 不是硬编码的拍数),
+ * 所以"拉长窗口"只是改一个变量, 不需要第二套计算。
+ *
+ * 窗口长度按电流自适应:
+ *     |I| >= 1 nA  ->   1 秒   (WINDOW_SHORT_TICKS)
+ *     |I| <  1 nA  ->  10 秒   (WINDOW_LONG_TICKS)   <- 小电流端靠时间换信噪比
+ *
+ * **原来的"小电流模式"(参考断开 + 纯积分) 已删除。** 它是第二套逻辑, 符号
+ * 约定各自实现了一遍, 结果就分叉了 —— 2026-09-13 实测抓到一次符号反了
+ * (码域与电压域差一层反相)。一条路就不存在分叉。
+ *
+ * 波形缓冲不能跟着窗口涨: 10s = 62500 拍, 两路要 250KB, 而 L431 只有 64KB。
+ * 所以按 window_decim 抽点存, 只供 B/X 回传。**结果计算不用这个缓冲** ——
+ * 端点码单独记 (v_last_*), 与抽点无关。 */
+#define WINDOW_SHORT_TICKS  TOTAL_CYCLE         /* 6250 拍 = 1 s */
+#define WINDOW_LONG_TICKS   (TOTAL_CYCLE * 10U) /* 62500 拍 = 10 s */
 
-static volatile uint8_t  si_active;
-static volatile uint8_t  si_done;
-static volatile uint8_t  si_short;      /* 撞轨提前收尾 (结果仍有效, 但积分时间短了) */
-static volatile uint32_t si_ticks;
-static uint32_t          si_target_ticks = SI_DEFAULT_SEC * SI_TICKS_PER_SEC;
-static uint32_t          si_decim;      /* 抽点存波形的间隔 */
-/* 起点/终点都存**原始码的平均**, 不存电压: 码域直接乘 q 就行, 不必过
- * LEVELSHIFT_GAIN。而 (V_ADC_ZERO - v) 那两项在相减时本来就会约掉 ——
- * 存电压等于白白把两个标称常量引进计算链 */
-static float             si_start_int, si_start_ext;    /* 起点 (平均原始码) */
-static float             si_cur_int,  si_cur_ext;       /* 结果 (A) */
-static uint16_t          si_ring_int[SI_AVG_TICKS];
-static uint16_t          si_ring_ext[SI_AVG_TICKS];
-static uint8_t           si_ring_n, si_ring_i;
-
-/* 前向声明 */
-static void SmallI_Tick(uint16_t raw, uint16_t raw_ext);
+static volatile uint32_t window_ticks = WINDOW_SHORT_TICKS;  /* 本次窗口长度 (拍) */
+static uint32_t          window_decim;                       /* 抽点存波形的间隔 */
+static volatile uint16_t v_last_int, v_last_ext;             /* 窗口最后一拍的码 */
 
 /* ---- ADC 域阈值 (原始码) ---- */
 static uint16_t code_upper, code_lower, code_zero;
@@ -266,8 +257,13 @@ void Current_Start(void)
     last_m = 0U;
     last_n = 0U;
     finish_flag = 0;
-    si_active = 0U;
-    si_done = 0U;
+
+    /* 抽点间隔由窗口长度决定 —— 缓冲只有 TOTAL_CYCLE 点, 窗口 10 秒就得抽 10 倍。
+     * window_ticks 本身**不在这里重置** —— 它由调用方 (MeasurementState) 决定,
+     * 换窗口重测时要保留。只在首次进 MODE1 时被设成短窗口。 */
+    window_decim = (window_ticks > TOTAL_CYCLE) ? (window_ticks / TOTAL_CYCLE) : 1U;
+    v_last_int = 0U;
+    v_last_ext = 0U;
 
     ThresholdCodes_Init();
 
@@ -301,12 +297,6 @@ void Current_Process(void)
 
     raw = ReadBoth(&raw_ext);       /* 内置(控制) + 外部(观测) 同拍 */
 
-    if (si_active)
-    {
-        SmallI_Tick(raw, raw_ext);
-        return;
-    }
-
     /* ---- 拉回相 (把积分器拉到接近 0V, 见 Precond_Tick 的注释) ----
      * 这一相不计数、不进缓冲; 它的最后一拍就是窗口起点 V_01 */
     if (precond_active)
@@ -315,16 +305,26 @@ void Current_Process(void)
         return;
     }
 
-    /* ---- 模式一: 滞回 bang-bang ---- */
+    /* ---- 测量窗口: 滞回 bang-bang ---- */
     /* 结果未被取走前不再采样, 否则下一个窗口会覆写缓冲头部 */
     if (finish_flag)
     {
         return;
     }
 
-    voltage_buf[sample_index] = raw;
-    voltage_buf_ext[sample_index] = raw_ext;
-    sample_index++;
+    /* 抽点存波形 —— 只供 B/X 回传, **结果计算不看它** (端点码走 v_last_*)。
+     * 10s 窗口抽 10 倍, 所以缓冲始终覆盖整段且不超过 TOTAL_CYCLE 点。 */
+    if ((window_decim <= 1U) || (((m_count + n_count) % window_decim) == 0U))
+    {
+        if (sample_index < TOTAL_CYCLE)
+        {
+            voltage_buf[sample_index] = raw;
+            voltage_buf_ext[sample_index] = raw_ext;
+            sample_index++;
+        }
+    }
+    v_last_int = raw;               /* 每拍都更新 —— 窗口真正的最后一拍 */
+    v_last_ext = raw_ext;
 
     /* bang-bang 阈值逻辑 (反相映射, 阈值永远生效):
      * POS(+50nA 注入) -> V_o 下降 -> V_ad 上升 -> 触 code_upper 切 NEG
@@ -349,14 +349,15 @@ void Current_Process(void)
         }
     }
 
-    if (sample_index >= TOTAL_CYCLE)
+    if ((m_count + n_count) >= window_ticks)
     {
-        /* 窗口完成: 中断内先算结果; 单次测量下主循环随后会停 TIM6,
-         * 完整窗口数据保留在电压缓冲里供 B 指令回传 */
-        window_current     = Calculate_Current_From(voltage_buf, v01_int);
-        window_current_ext = Calculate_Current_From(voltage_buf_ext, v01_ext);
+        /* 窗口完成 (长度由 window_ticks 决定, 1s 或 10s)。中断内先算结果;
+         * 单次测量下主循环随后会停 TIM6, 抽点后的波形留在缓冲里供 B/X 回传 */
+        window_current     = Calculate_Current_From(v01_int, v_last_int);
+        window_current_ext = Calculate_Current_From(v01_ext, v_last_ext);
         finish_flag = 1;            /* 同时封存窗口, 直到消费方取走结果 */
-        last_window_count = TOTAL_CYCLE;
+        last_window_count = sample_index;
+        last_window_ticks = m_count + n_count;
         last_m = m_count;
         last_n = n_count;
         sample_index = 0;
@@ -375,39 +376,65 @@ void Current_Process(void)
  * (ADS8866) 同 tick 同索引存储, 因此可以逐点互换。
  * 物理实验表征固件里最终结果以 ADS8866 为准 (16 位分辨率, 内置只有 12 位
  * 左移 4 位、等效 16 码), 内置那路作为对照。 */
-float Calculate_Current_From(const uint16_t *buf, uint16_t v_first)
+float Calculate_Current_From(uint16_t c_first, uint16_t c_last)
 {
     float n_total, dc;
 
-    if (sample_index == 0U)
+    n_total = (float)(m_count + n_count);
+    if (n_total <= 0.0f)
     {
         return 0.0f;
     }
 
     /* ---- 为什么分母是 (m+n), 不用减一 ----
-     * 窗口两端都是 ISR 采样: v_first 是拉回相最后一拍, buf[sample_index-1] 是
-     * 最后一个窗口采样。而计数覆盖的正好是它们之间的那些间隔 —— ISR 的采样和
-     * 参考切换落在同一套节拍网格上, 一一对应, 没有"多出来的一拍"需要判断归属。
+     * 窗口两端都是 ISR 采样: c_first 是拉回相最后一拍, c_last 是窗口最后一拍。
+     * 而计数覆盖的正好是它们之间的那些间隔 —— ISR 的采样和参考切换落在同一套
+     * 节拍网格上, 一一对应, 没有"多出来的一拍"需要判断归属。
      * (旧设计窗口两端是窗口内的采样点, 只有 N-1 个间隔而计数有 N 拍, 才要减一,
-     *  而且减在哪个计数器上还依赖开窗极性 —— 那个纠缠随这次重构一起消失了) */
-    dc = (float)buf[sample_index - 1U] - (float)v_first;
+     *  而且减在哪个计数器上还依赖开窗极性 —— 那个纠缠随这次重构一起消失了)
+     *
+     * 分母是 m+n 而**不是任何硬编码的拍数** —— 所以这个式子对 1s 和 10s 窗口
+     * 同样成立, 换窗口长度不需要换公式。这是"全量程一套逻辑"的支点。 */
+    dc = (float)c_last - (float)c_first;
 
     /* 端点项直接在码域算。推导:
      *   Vo = (V_ADC_ZERO - c·VREF/65536)/GAIN
      *   Vo1 - Vo2 = (c2 - c1)·VREF/(65536·GAIN)     <- V_ADC_ZERO 在这里约掉了
      *   C·(Vo1 - Vo2) = [C·VREF/(65536·GAIN)]·(c2 - c1) = q·(c2 - c1)
      * 于是省掉一次除法和 V_ADC_ZERO, 而且 q 是可标定量 (cal_coef), 不再依赖
-     * C / VREF / GAIN 三个从没测过的标称值 */
-    n_total = (float)(m_count + n_count);
-    n_total = Cal_GetQ() * dc / (n_total * T_INT)
-              - ((float)m_count * Cal_GetIPos() + (float)n_count * Cal_GetINeg()) / n_total;
-
-    return n_total;
+     * C / VREF / GAIN 三个从没测过的标称值。
+     *
+     * **注意码域与电压域差一层反相** (V_adc = 1.55 - 0.33*V_o, 积分器电压下降
+     * 时码值反而上升), 所以是 (c_last - c_first) 而不是反过来 —— 2026-09-13
+     * 在小电流模式那边正是漏了这一层, 实测抓到符号反了。 */
+    return Cal_GetQ() * dc / (n_total * T_INT)
+           - ((float)m_count * Cal_GetIPos() + (float)n_count * Cal_GetINeg()) / n_total;
 }
 
 /* 窗口起点 (拉回相最后一拍的采样码), 供结果行的 RAW 段上报 */
 uint16_t Current_GetFirstCode(void)    { return v01_int; }
 uint16_t Current_GetFirstCodeExt(void) { return v01_ext; }
+
+/* 窗口最后一拍 —— 每拍都更新, 与抽点存缓冲无关 (10s 窗口下缓冲是抽点过的,
+ * 拿 buf[末尾] 当终点会错) */
+uint16_t Current_GetLastCode(void)    { return v_last_int; }
+uint16_t Current_GetLastCodeExt(void) { return v_last_ext; }
+
+/* 窗口长度 (拍)。短 6250 拍 = 1s, 长 62500 拍 = 10s。
+ * 换长度必须在 Current_Start() **之前**调用 —— Current_Start 会按它算抽点间隔。 */
+void Current_SetWindowTicks(uint32_t ticks)
+{
+    window_ticks = (ticks < 1U) ? 1U : ticks;
+}
+
+/* 最近一个窗口的**实际拍数** —— 结果行的 T= 用它。
+ * (不能用 Current_GetSampleCount(): 那是抽点后的**存储点数**, 10s 窗口下只有
+ *  6250, 拿它算 T= 会少报 10 倍) */
+uint32_t Current_GetWindowTicks(void)
+{
+    return (last_window_ticks > 0U) ? last_window_ticks : window_ticks;
+}
+uint32_t Current_GetWindowTicksCfg(void) { return window_ticks; }
 
 uint8_t Current_WindowFinished(void)
 {
@@ -543,119 +570,6 @@ float Current_GetSwingVoltage(void)
     return (float)dv;
 }
 
-/* ============================================================
- * 小电流模式 (1 pA ~ 1 nA): 纯积分 + 斜率
- *
- * 为什么不用模式二的双斜率: 1 pA 时上积相要 t1 = C*dV/I = 200 秒才积得
- * 起 2V, 10 秒预算连一个循环都跑不完 —— 模式二的下限约 6 pA 就是这么来的。
- * 而小电流根本不需要参考电流把它拉回来: 1 pA 积 3 秒才 30mV, 离 ±4.3V
- * 的轨远得很, 直接积、测首尾两点即可。
- *
- *   I = C * (V_start - V_end) / T  =  q * (码_start - 码_end) / T
- *
- * 符号与模式一同一约定 (与 I_POS 同号为正): I_POS 使 V_int 下降、原始码
- * 上升, 所以正电流 -> 码上升 -> V_start > V_end -> I > 0。
- *
- * 积分时间默认 3 秒: 上限由 90 pA 卡出来 (90pA*3s/100pF = 2.7V, 不撞轨),
- * 下限由 1 pA 的分辨率卡出来 (1pA*3s/100pF = 30mV = ADS8866 的 196 码)。
- * 积分中 |dV| 超过 3.5V 就提前收尾并按**实际**时间计算, 免得大电流直接撞轨。
- * ============================================================ */
-void SmallI_SetSeconds(uint8_t sec)
-{
-    if (sec < 1U) { sec = 1U; }
-    if (sec > SI_MAX_SEC) { sec = SI_MAX_SEC; }
-    si_target_ticks = (uint32_t)sec * SI_TICKS_PER_SEC;
-}
-
-uint8_t SmallI_GetSeconds(void)
-{
-    return (uint8_t)(si_target_ticks / SI_TICKS_PER_SEC);
-}
-
-/* 收尾: 由末尾若干拍平均出终点, 再用实际积分时间算电流 */
-static void SmallI_Finish(void)
-{
-    float sum_i = 0.0f, sum_e = 0.0f, t_s;
-    uint8_t k;
-
-    for (k = 0U; k < si_ring_n; k++)
-    {
-        sum_i += (float)si_ring_int[k];     /* 码域, 见 si_start_int 的注释 */
-        sum_e += (float)si_ring_ext[k];
-    }
-    if (si_ring_n > 0U)
-    {
-        sum_i /= (float)si_ring_n;
-        sum_e /= (float)si_ring_n;
-    }
-
-    /* I = C·(V_积分器_start - V_积分器_end)/T
-     *
-     * **注意码域与电压域是反的**: 电平移位是 V_adc = 1.55 - 0.33*V_o,
-     * 所以 Δcode = -0.33*ΔV_o*(65536/3.3) —— 积分器电压下降时码值上升。
-     * 因此把上式搬到码域时**必须把两项对调**:
-     *
-     *     I = q·(码_end - 码_start)/T
-     *
-     * 原来写的是 (si_start_int - sum_i), 等于把电压域的式子直接抄进码域,
-     * 漏了这一层反相 —— 整个小电流模式的符号因此翻转。
-     * 2026-09-13 实测确认: 2636B 给 +0.500 nA, 原代码读 -0.477 nA (3 次
-     * 一致 ±1%); 同一时刻模式一在 +2.000 nA 上读 +1.98 nA (符号正确)。
-     * 方向与模式一保持一致 (那边 dc = buf[end] - v_first)。 */
-    t_s = (float)si_ticks * T_INT;
-    if (t_s > 0.0f)
-    {
-        si_cur_int = Cal_GetQ() * (sum_i - si_start_int) / t_s;
-        si_cur_ext = Cal_GetQ() * (sum_e - si_start_ext) / t_s;
-    }
-
-    window_current     = si_cur_int;
-    window_current_ext = si_cur_ext;
-    last_window_count  = sample_index;      /* B/X 回传用: 抽点后的点数 */
-    last_m = si_ticks;                      /* 借用: 实际积分拍数 (标定/诊断) */
-    last_n = 0U;
-
-    si_active = 0U;
-    si_done   = 1U;
-    HAL_TIM_Base_Stop_IT(&htim6);
-    ADG_Disable();
-}
-
-/* 每 tick 调用 (由 Current_Process 转发, 已带两路采样) */
-static void SmallI_Tick(uint16_t raw, uint16_t raw_ext)
-{
-    float d;
-
-    /* 末尾平均用的环形 (终点用最后几拍, 单点噪声太大) */
-    si_ring_int[si_ring_i] = raw;
-    si_ring_ext[si_ring_i] = raw_ext;
-    si_ring_i = (uint8_t)((si_ring_i + 1U) % SI_AVG_TICKS);
-    if (si_ring_n < SI_AVG_TICKS) { si_ring_n++; }
-
-    si_ticks++;
-
-    /* 抽点存波形: 整段积分过程可见 (B/X 回传), 但缓冲只有 6250 点 */
-    if ((sample_index < TOTAL_CYCLE) && ((si_ticks % si_decim) == 0U))
-    {
-        voltage_buf[sample_index]     = raw;
-        voltage_buf_ext[sample_index] = raw_ext;
-        sample_index++;
-    }
-
-    d = (float)raw - si_start_int;
-    if (d < 0.0f) { d = -d; }
-    if (d >= (float)SI_RAIL_CODE)
-    {
-        si_short = 1U;                      /* 电流比预期大: 提前收尾, 用实际 T */
-        SmallI_Finish();
-        return;
-    }
-
-    if (si_ticks >= si_target_ticks)
-    {
-        SmallI_Finish();
-    }
-}
 
 /* 把积分器拉到零位 (阻塞)。必须在 TIM6 未跑时调用 ——
  * Adc_ReadRaw 不可重入, 不能与 ISR 里的转换并发。
@@ -691,49 +605,6 @@ void Current_PullToZero(void)
     }
     ADG_Disable();                          /* 断开参考: 只让被测电流积分 */
 }
-
-void SmallI_Start(void)
-{
-    uint16_t raw = 0U, ext = 0U;
-    uint32_t i;
-    float sum_i = 0.0f, sum_e = 0.0f;
-
-    /* ---- 复位相 (阻塞): 拉到零位, 让两个方向的电流都有满摆幅可用 ---- */
-    Current_PullToZero();
-
-    /* ---- 稳定等待 + 起点 (阻塞) ----
-     * 断开瞬间有电荷注入台阶, 必须先等它过去再取起点; 否则那一步会被
-     * 当成被测电流积出来的电压。 */
-    for (i = 0U; i < SI_SETTLE_TICKS; i++) { (void)ReadBoth(&ext); }
-    for (i = 0U; i < SI_SETTLE_TICKS; i++)
-    {
-        raw = ReadBoth(&ext);
-        sum_i += (float)raw;                /* 码域, 见 si_start_int 的注释 */
-        sum_e += (float)ext;
-    }
-    si_start_int = sum_i / (float)SI_SETTLE_TICKS;
-    si_start_ext = sum_e / (float)SI_SETTLE_TICKS;
-
-    /* ---- 开积分 ---- */
-    si_ticks  = 0U;
-    si_ring_n = 0U;
-    si_ring_i = 0U;
-    si_done   = 0U;
-    si_short  = 0U;
-    si_decim  = (si_target_ticks > TOTAL_CYCLE) ? (si_target_ticks / TOTAL_CYCLE) : 1U;
-    sample_index = 0U;
-    window_current = 0.0f;
-    window_current_ext = 0.0f;
-
-    si_active = 1U;
-    HAL_TIM_Base_Start_IT(&htim6);
-}
-
-uint8_t SmallI_IsFinished(void) { return si_done; }
-uint8_t SmallI_IsShort(void)    { return si_short; }
-float   SmallI_GetCurrentInt(void) { return si_cur_int; }
-float   SmallI_GetCurrentExt(void) { return si_cur_ext; }
-uint32_t SmallI_GetActualTicks(void) { return last_m; }   /* 供结果行报实际积分时间 */
 
 /* ============================================================
  * 手动模式 (串口 M 指令) —— 阻塞式连续采样, 不走 TIM6 网格

@@ -4,25 +4,31 @@
 #include <math.h>
 
 /* ============================================================
- * 测量状态机 (单次测量语义, 用户确认的最终设计):
- *   IDLE -> (S 指令) -> MODE1 (1s 窗口) -> >=1nA: 出结果, 自动回 IDLE
- *                                      -> <1nA: 小电流模式 -> 出结果, 自动回 IDLE
+ * 测量状态机 (单次测量语义):
+ *   IDLE -> (S 指令) -> 窗口(1s) -> |I| >= 1nA: 出结果, 回 IDLE
+ *                                -> |I| <  1nA: 换 10s 窗口重测一次 -> 出结果
  *   一次指令 = 一次完整测量, 测完停住 (TIM6 停 + ADG 关断);
  *   无取消/无连续模式 (越简单越可靠), 测量期间忽略一切指令
  *
- * 2026-09-13: 原"模式二 双斜率硬积分"废弃, 由小电流模式取代
- * (理由见 current.h 顶部: 积不起来 + 依赖 EN=0 的 Hi-Z 暂态)。
- * 状态机的结构没动, 只是把名叫 MODE2 的那个状态改成实名 SMALLI。
+ * 2026-09-13 重构: **全量程只有一套测量逻辑** (电荷平衡, 见 current.c 的
+ * 测量窗口注释)。原来 |I|<1nA 会切到独立的"小电流模式"(参考断开+纯积分),
+ * 那是第二套逻辑 —— 符号约定各自实现一遍, 结果就分叉了 (实测抓到一次符号反)。
+ * 现在小电流端只是**把窗口从 1s 拉到 10s**, 公式一个字都不用改
+ * (分母是 m+n, 与窗口长度无关)。
+ *
+ * 状态也少了一个: 换窗口后仍然停在 MODE1, 只是窗口长了。用一个标志位
+ * (long_tried) 保证只换一次, 不会来回切。
  * ============================================================ */
 
-#define DIRECT_MEASURE_THRESHOLD 1e-9f   /* 1nA: 低于则自动进入小电流模式 */
+#define DIRECT_MEASURE_THRESHOLD 1e-9f   /* 1nA: 低于则换 10s 窗口重测 */
 
 static MeasurementState measurement_state;
 static float measurement_result;            /* 内置 ADC 算出的结果 */
 static float measurement_result_ext;        /* ADS8866 算出的结果 (表征以它为准) */
-static uint32_t measurement_ticks;          /* 小电流模式实际积分拍数 */
-static uint8_t result_is_smalli;
+static uint32_t measurement_ticks;          /* 本次窗口的实际拍数 (结果行的 T=) */
+static uint8_t result_is_longw;             /* 结果是否来自 10s 长窗口 (结果行 MODE=2) */
 static uint8_t result_is_timeout;
+static uint8_t long_tried;                  /* 本次测量已经换过 10s 窗口 */
 
 void MeasurementState_Init(void)
 {
@@ -30,8 +36,9 @@ void MeasurementState_Init(void)
     measurement_result = 0.0f;
     measurement_result_ext = 0.0f;
     measurement_ticks = 0U;
-    result_is_smalli = 0;
-    result_is_timeout = 0;
+    result_is_longw = 0U;
+    result_is_timeout = 0U;
+    long_tried = 0U;
 }
 
 void MeasurementState_StartCommand(void)
@@ -40,6 +47,11 @@ void MeasurementState_StartCommand(void)
     {
         return;
     }
+
+    /* 每次测量都从短窗口起步 —— 由它决定要不要换长的。
+     * 必须在 Current_Start() 之前设: Start 按窗口长度算抽点间隔。 */
+    long_tried = 0U;
+    Current_SetWindowTicks(CURRENT_WIN_SHORT_TICKS);
 
     Current_Start();
     if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
@@ -73,57 +85,45 @@ MeasurementProcessResult MeasurementState_Process(void)
         return MEASUREMENT_PROCESSING;
 
     case MEASUREMENT_STATE_MODE1:
-        /* 1s 窗口结果 (中断内算好) */
+        /* 窗口结果 (中断内算好) */
         if (!Current_WindowFinished())
         {
             return MEASUREMENT_PROCESSING;
         }
         /* 顺序要紧: 先取结果, 再停表, 最后才解除封存 —— 若先解除, 到停表
-         * 之间落下一个 TIM6 中断, 会往 voltage_buf[0] 追加窗口外样本 */
+         * 之间落下一个 TIM6 中断, 会往电压缓冲头部追加窗口外样本 */
         current = Current_GetWindowResult();
         current_ext = Current_GetWindowResultExt();
         HAL_TIM_Base_Stop_IT(&htim6);
         Current_ClearWindowFlag();
 
-        /* 实际积分拍数 —— 结果行的 T= 就是它 * 160us。模式一恒为整窗 6250 拍
-         * (=1000ms), 但必须在这里显式赋值: 这个变量只在下面小电流分支里被写过,
-         * 模式一不赋值的话 T= 会报 0ms (实测踩过, 报告里 I=C*dV/T 的 T 就错了)。
-         * 转小电流模式时会被下面的 SmallI_GetActualTicks() 覆写。 */
-        measurement_ticks = Current_GetSampleCount();
+        /* 结果行的 T= 用**实际拍数**, 不是 Current_GetSampleCount() ——
+         * 后者是抽点后存入缓冲的点数, 10s 窗口下只有 6250, 拿它算 T= 会少报
+         * 10 倍 (这正是"注释写拍、实际是点数"那类老坑的新形态) */
+        measurement_ticks = Current_GetWindowTicks();
 
-        /* 判据取绝对值 —— 只判单边的话会把大负电流也送进去, 白等一整轮 */
-        if (fabsf(current) < DIRECT_MEASURE_THRESHOLD)
+        if ((fabsf(current) < DIRECT_MEASURE_THRESHOLD) && (long_tried == 0U))
         {
-            /* <1nA: 自动进入小电流模式 (纯积分 + 首尾斜率)。
-             * 上面先停了表不影响它 —— SmallI_Start 自己会重启 TIM6 */
-            SmallI_Start();
-            measurement_state = MEASUREMENT_STATE_SMALLI;
-            return MEASUREMENT_SMALLI_STARTED;
+            /* <1nA: 换 10s 窗口重测一次。
+             * **同一条测量逻辑**, 只是窗口更长 —— 公式不用改。 */
+            long_tried = 1U;
+            Current_SetWindowTicks(CURRENT_WIN_LONG_TICKS);
+            Current_Start();
+            if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
+            {
+                Current_Stop();
+                measurement_state = MEASUREMENT_STATE_IDLE;
+                return MEASUREMENT_PROCESSING;
+            }
+            measurement_state = MEASUREMENT_STATE_MODE1;   /* 还是 MODE1, 窗口变长 */
+            return MEASUREMENT_LONGW_STARTED;
         }
 
-        /* >=1nA: 单次测量完成 */
+        /* 出结果 */
         measurement_result = current;
         measurement_result_ext = current_ext;
-        result_is_smalli = 0;
-        result_is_timeout = 0;  /* 只在小电流分支赋值, 不清会把上次的粘过来 */
-        MeasurementState_Finish();
-        return MEASUREMENT_RESULT_READY;
-
-    case MEASUREMENT_STATE_SMALLI:
-        if (!SmallI_IsFinished())
-        {
-            return MEASUREMENT_PROCESSING;
-        }
-
-        /* 小电流模式没有"超时"一说: 积分撞到 3.5V 就提前收尾并按**实际**
-         * 时间计算, 结果仍然有效 (只是积分时间短了、信噪比差些)。 */
+        result_is_longw = long_tried;
         result_is_timeout = 0U;
-        measurement_result     = SmallI_GetCurrentInt();
-        measurement_result_ext = SmallI_GetCurrentExt();
-        measurement_ticks      = SmallI_GetActualTicks();
-        result_is_smalli = 1;
-
-        /* 单次测量完成: 不再回到模式一 */
         MeasurementState_Finish();
         return MEASUREMENT_RESULT_READY;
     }
@@ -149,9 +149,9 @@ float MeasurementState_GetResultExt(void)
     return measurement_result_ext;
 }
 
-uint8_t MeasurementState_ResultIsSmallI(void)
+uint8_t MeasurementState_ResultIsLongW(void)
 {
-    return result_is_smalli;
+    return result_is_longw;
 }
 
 uint8_t MeasurementState_ResultIsTimeout(void)
