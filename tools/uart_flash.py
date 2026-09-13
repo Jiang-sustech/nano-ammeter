@@ -1,7 +1,13 @@
 # STM32 ROM bootloader UART 烧录器 (AN3155 协议)
 # 用法: python uart_flash.py <bin路径> [COM口] [波特率]
 # 板子: STM32L431CCT6 + CH340(PA9/PA10), Bootloader 要求 8E1
-# 进入方式 (当前板无自动复位电路, 手动): 拉高 BOOT0, 按一下复位, 松开 BOOT0
+#
+# 进入方式: **自动** (DTR/RTS 经双管电路驱动 NRST/BOOT0)。
+# 据 2026-09-13 网表:
+#   U7.14 RTS# --R20(1k)--> Q2 栅极;  Q2 源极=3V3, 漏极 --R23--> BOOT0
+#   U7.13 DTR# --R19(1k)--> Q1 栅极;  Q1 源极=RTS#, 漏极 --R17/D1--> NRST
+#   静偏置: R16=10k 把 BOOT0 下拉到 AGND, R27=10k 把 NRST 上拉到 3V3
+# 失败时回退到手动: BOOT0 拉高 -> 按一下复位 -> 松开 BOOT0
 import serial
 import serial.tools.list_ports
 import sys
@@ -32,18 +38,59 @@ def tx(b, n=1):
     s.write(b)
     return s.read(n)
 
-# ---- 1. 握手 (90 秒窗口, 等待手动进入 bootloader) ----
-print('等待 bootloader ... 请执行: BOOT0 拉高 -> 按一下复位 -> 松开 BOOT0')
-deadline = time.time() + 90.0
-r = b''
-while time.time() < deadline:
-    r = tx(b'\x7f')
-    if r and r[0] == 0x79:
+# ---- 1. 握手: 先试自动进 bootloader, 不行再回退手动 ----
+# RTS 有效时 Q2 把 BOOT0 抬到 3V3; DTR/RTS 交叉翻转产生 NRST 脉冲。
+# **极性不猜**: pyserial 的 True/False 与 CH340 引脚有效电平的对应关系
+# 随驱动而异, 所以下面依次试几组常见序列, 哪组先收到 0x79 就用哪组并打印出来。
+BOOT_SEQS = [
+    ('DTR/RTS 交叉 (ESP 式)', [(False, True), (True, False), (False, False)]),
+    ('反相交叉',              [(True, False), (False, True), (True, True)]),
+    ('同时有效 -> 释放',      [(True, True), (False, False)]),
+]
+
+
+def try_enter(seq):
+    for d, r_ in seq:
+        s.dtr = d
+        s.rts = r_
+        time.sleep(0.08)
+    s.reset_input_buffer()
+    for _ in range(30):
+        s.write(b'\x7f')
+        r_ = s.read(1)
+        if r_ and r_[0] == 0x79:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+print('自动进入 bootloader ...')
+entered = False
+for label, seq in BOOT_SEQS:
+    if try_enter(seq):
+        print(f'[OK] 进入 bootloader (生效序列: {label})')
+        entered = True
         break
-    time.sleep(0.5)
-if not r or r[0] != 0x79:
-    print('握手失败 (90 秒超时):', r.hex(' ') if r else '无响应'); sys.exit(1)
-print('[OK] handshake ACK')
+    print(f'     {label} 未握手')
+
+if not entered:
+    # --wait: 不设截止时间, 一直等按键。用于"手上没空, 什么时候按都行"的场合;
+    #          不加则只等 90 秒 (CI/无人值守时不会挂死)。
+    wait_s = 3600.0 if '--wait' in sys.argv else 90.0
+    print('自动进入失败, 回退手动 (%s):'
+          % ('无限等待, Ctrl-C 中止' if wait_s > 1000 else '90 秒窗口'))
+    print('  请执行: 按住 SW1(BOOT0) -> 点一下 SW3(RST) -> 松开 SW1')
+    print('  或者: BOOT0 拉高 -> 按一下复位 -> 松开 BOOT0')
+    deadline = time.time() + wait_s
+    r = b''
+    while time.time() < deadline:
+        r = tx(b'\x7f')
+        if r and r[0] == 0x79:
+            break
+        time.sleep(0.5)
+    if not r or r[0] != 0x79:
+        print('握手失败:', r.hex(' ') if r else '无响应'); sys.exit(1)
+    print('[OK] handshake ACK (手动)')
 
 # ---- 2. GET / GET ID (精确长度读取, 避免超时读阻塞) ----
 def cmd2(cmd, timeout=2.0):
@@ -142,5 +189,16 @@ if not ok:
 s.write(bytes([0x21, 0xDE]) + FLASH_BASE.to_bytes(4, 'big') + bytes([0x08]))
 r = s.read(1)
 print('GO 应答:', r.hex(' ') if r else '(无回应, 芯片已在运行)')
+
+# ---- 7. 释放 DTR/RTS ----
+# 必须做: 还留在"进 bootloader"那组电平上的话, BOOT0 仍是高, 下次复位又进
+# bootloader 而不是跑刚烧进去的 app。
+try:
+    s.dtr = False
+    s.rts = False
+except Exception:
+    pass
+time.sleep(0.1)
+print('已释放 DTR/RTS (BOOT0 回到下拉)。建议再发一次 E 确认 app 在跑。')
 print('=== FLASH DONE ===')
 s.close()

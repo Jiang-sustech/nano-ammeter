@@ -3,7 +3,7 @@ function test_fit_constants()
 %
 %   手上还没有实测数据, 先用合成的验一遍: 给定真值, 看能不能还原。
 %
-%   matlab -batch "cd('tools'); test_fit_constants"
+%   bash tools/matlab_utf8.sh "cd('tools'); test_fit_constants"
 
     fprintf('\n############ 1. 无噪声: 必须精确还原 ############\n');
     t1 = local_make(200, 0.0);

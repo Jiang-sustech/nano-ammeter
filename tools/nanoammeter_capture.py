@@ -57,6 +57,7 @@ def _opt_float(name):
 # 位置参数只有一个 (端口), 其余是开关 —— 开关不能顶到 PORT 的位置上
 DO_NOISE = "--no-noise" not in sys.argv
 TRUE_NA = _opt_float("--true")      # 本次输入电流的**已知真值** (nA), 拟合用
+MANUAL  = _opt_float("--manual")    # M 指令子模式 (0=断开量tau / 1=+5V / 2=-5V)
 _rest = [a for a in sys.argv[1:] if not a.startswith("--")]
 PORT = _rest[0] if _rest else "COM7"
 
@@ -205,11 +206,25 @@ def raw_fields(m):
 
 def main():
     ser = serial.Serial(PORT, BAUD, timeout=0.2)
+    # ---- 释放 DTR/RTS (重要) ----
+    # 本板的自动复位电路 (2026-09-13 网表) 拿这两条线驱动 NRST / BOOT0:
+    #   RTS# 经 Q2 把 BOOT0 抬到 3V3; DTR#/RTS# 交叉翻转产生 NRST 脉冲。
+    # 而串口驱动**默认会置位这两条线** —— 那意味着打开串口就把 BOOT0 拉高,
+    # 此后任何复位都会让芯片进 ROM bootloader 而不是跑 app (实测踩过)。
+    # 这里主动释放, 让 BOOT0 回到 R16 的下拉。
+    # 注意: pyserial 的 True/False 与 CH340 引脚有效电平的对应随驱动而异,
+    # 所以**这一步是尽力而为**; 真正的保险是下面 [2] 的 E 指令应答检查。
+    try:
+        ser.dtr = False
+        ser.rts = False
+    except Exception:
+        pass
     time.sleep(0.3)
     ser.reset_input_buffer()
 
     out = {}
     result_line = ""
+    MANUAL_LINE = ""
 
     print("[1] boot banner")
     try:
@@ -221,9 +236,19 @@ def main():
     ser.write(b"E\n")
     wait_line(ser, "EXT ", 5.0)
 
-    print("[3] S: single measurement")
-    ser.write(b"S\n")
-    result_line = wait_line(ser, "I=", 30.0)
+    if MANUAL is not None:
+        # 手动模式 (M 指令): 阻塞连采 6250 点, 不走 TIM6 网格。
+        # M0 = 断开参考量 tau; M1/M2 = 固定极性给 q 做开环标定。
+        sub = int(MANUAL)
+        print("[3] M%d: 手动连采 (阻塞约 130ms)" % sub)
+        ser.write(("M%d\n" % sub).encode())
+        MANUAL_LINE = wait_line(ser, "MAN DONE", 30.0)
+        print("    <- %s" % MANUAL_LINE)
+        result_line = MANUAL_LINE
+    else:
+        print("[3] S: single measurement")
+        ser.write(b"S\n")
+        result_line = wait_line(ser, "I=", 30.0)
 
     print("[4] B: internal ADC waveform")
     ser.write(b"B\n")
@@ -252,12 +277,21 @@ def main():
     ser.close()
 
     wi, we, ns = out["wave_int"], out["wave_ext"], out["noise"]
-    path = capture_name(result_line)
+    if MANUAL is not None:
+        # 手动模式没有 "I=" 结果行, capture_name() 会退化成 NO_RESULT —— 显式命名
+        path = "raw_%s_M%d.npz" % (time.strftime("%m_%d"), int(MANUAL))
+        _t = re.search(r"tick_ns=(\d+)", MANUAL_LINE or "")
+        manual_tick_ns = int(_t.group(1)) if _t else 0
+    else:
+        path = capture_name(result_line)
+        manual_tick_ns = 0
 
     m = RESULT_RE.search(result_line or "")
     np.savez(
         path,
         wave_int=wi, wave_ext=we, noise=ns,
+        manual_sub=(int(MANUAL) if MANUAL is not None else -1),
+        manual_tick_ns=manual_tick_ns,
         lines=np.array(TRANSCRIPT),            # 固件说过的每一行, 原样留档
         result_line=result_line,
         result_na=(float(m.group("i")) if m else np.nan),

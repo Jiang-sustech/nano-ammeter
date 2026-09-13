@@ -167,7 +167,19 @@ function T = local_read(src)
         T = src;
     elseif ischar(src) || isstring(src)
         T = readtable(src);
-        T.Properties.VariableNames = lower(T.Properties.VariableNames);
+        % 列名大小写归一。**不能整表 lower()** —— 那会把 I_true 变成 i_true,
+        % 而下面 need 与全文引用的都是 I_true (2026-09-13 实测踩到:
+        % istable 分支不做这个变换, 所以自测全过、真读文件就报"缺少 I_true")。
+        vn = T.Properties.VariableNames;
+        for k = 1:numel(vn)
+            lk = lower(vn{k});
+            if strcmp(lk, 'i_true')
+                vn{k} = 'I_true';
+            elseif any(strcmp(lk, {'c1', 'c2', 'm', 'n'}))
+                vn{k} = lk;
+            end
+        end
+        T.Properties.VariableNames = vn;
     else
         error('fit_constants:src', '给 CSV 路径或 table');
     end
