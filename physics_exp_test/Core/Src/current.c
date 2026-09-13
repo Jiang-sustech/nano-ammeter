@@ -434,7 +434,6 @@ uint32_t Current_GetWindowTicks(void)
 {
     return (last_window_ticks > 0U) ? last_window_ticks : window_ticks;
 }
-uint32_t Current_GetWindowTicksCfg(void) { return window_ticks; }
 
 uint8_t Current_WindowFinished(void)
 {

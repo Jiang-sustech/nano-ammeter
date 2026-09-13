@@ -79,7 +79,6 @@ uint16_t Current_GetLastCodeExt(void);   /* 窗口最后一拍 (外部路) */
 #define CURRENT_WIN_LONG_TICKS    62500U    /* 10 s —— |I| <  1 nA, 靠时间换信噪比 */
 void Current_SetWindowTicks(uint32_t ticks);
 uint32_t Current_GetWindowTicks(void);      /* 最近窗口的**实际拍数** (结果行 T= 用它) */
-uint32_t Current_GetWindowTicksCfg(void);   /* 当前配置值 (尚未跑窗口时用) */
 float Current_GetWindowResultExt(void); /* 同一窗口由 ADS8866 算出的结果 */
 uint8_t Current_WindowFinished(void);  /* 窗口完成脉冲 (每秒一次, 消费式) */
 void Current_ClearWindowFlag(void);

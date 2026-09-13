@@ -86,12 +86,20 @@ def pc_chop_start(smu, i_peak, duty, ton, toff, duration, stop_flag):
     return t
 
 
-def measure_once(ser, smu, settle=0.0):
-    if settle:
-        time.sleep(settle)
-    smp = ReadbackSampler(smu); smp.start()
+def measure_once(ser, smu, sample_readback=True):
+    """测一次装置读数。
+
+    sample_readback 只在**直流**段为 True。脉冲段必须关掉, 两个原因:
+      ① 2600B 在脉冲模式下**只在 ton 末尾测量** —— 它的回读是**峰值**, 不是平均,
+         拿来当"实际输出"是错的 (真值应当由 I_peak x 占空比 算);
+      ② 我们自己额外发 measure.i() 可能干扰脉冲时序。
+    """
+    smp = None
+    if sample_readback:
+        smp = ReadbackSampler(smu)
+        smp.start()
     d = board_measure(ser)
-    rb = smp.stop(10)
+    rb = smp.stop(10) if smp else []
     return d, (sum(rb) / len(rb) if rb else float('nan'))
 
 
@@ -173,13 +181,20 @@ def main():
                 else:
                     if chop_thread:
                         stop_flag['stop'] = True; time.sleep(0.3); chop_thread = None
+                    # 先把脉冲串停掉, 再设直流 —— 否则脉冲可能还在跑, 直流设不进去
+                    try:
+                        smu.write('smua.abort()')
+                    except Exception:
+                        pass
+                    time.sleep(0.2)
                     smu.write('smua.source.output = smu.OUTPUT_ON')
                     smu.write('smua.source.leveli = %.9e' % (i_avg * 1e-9))
                     time.sleep(2.0)
 
                 dev, rb = [], []
                 for k in range(a.n):
-                    d, r_avg = measure_once(ser, smu)
+                    # 脉冲段不采回读 (见 measure_once 的注释); 直流段照采
+                    d, r_avg = measure_once(ser, smu, sample_readback=(kind == 'dc'))
                     if d is None:
                         continue
                     dev.append(float(d['i']))
