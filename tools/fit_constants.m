@@ -118,11 +118,21 @@ function out = fit_constants(src, varargin)
     if lev_1 > 0 && lev_2 > lev_1
         r = lev_2 / lev_1;
         fprintf('    -> 杠杆比 = %.0f : 1\n', r);
-        fprintf('       所以 I+/I- 比 M 定得准约 %.0f 倍 (这就是标准误那一列的来源)。\n', r);
-        fprintf('       两者通常都在可用范围。若要把 q 再压一个量级:\n');
-        fprintf('       改用**开环** —— 固定参考极性、灌已知电流、让 Δc 跑满整条斜坡,\n');
-        fprintf('       单点杠杆还能再大几倍, 重复 N 次再降 sqrt(N)。\n');
-        fprintf('       (注意: 不能靠"参考断开"来做 —— EN=0 是 Hi-Z 不是 0A)\n');
+        fprintf('       计数项杠杆由**实验设计**保证(已知电流跨量程、正负都有),\n');
+        fprintf('       端点项杠杆则**取决于数据**: 窗口长度固定 6250 拍,\n');
+        fprintf('       锯齿周期由电流决定 -> 终点相位 = 6250 mod 周期,\n');
+        fprintf('       **同一个电流重复测相位相同**, 只有换电流才产生跨度。\n');
+
+        relM = abs(se_M / M);
+        if relM > 5e-4
+            fprintf('       >> 本次 M(q) 的相对标准误 %.3f%% 偏大,\n', relM*100);
+            fprintf('          >> 建议 q 改用**开环**测量 (见 docs/校准方案推导.md 5.4)\n');
+        else
+            fprintf('       本次 M(q) 的相对标准误 %.3f%%, 可用;\n', relM*100);
+            fprintf('       想更稳可另做一次开环测量互相印证。\n');
+        end
+        fprintf('       开环: 固定参考极性 + 灌已知电流 + 让 Δc 跑满斜坡, 重复 N 次降 sqrt(N)\n');
+        fprintf('       注意**不能靠"参考断开"** —— EN=0 是 Hi-Z 不是 0A。\n');
     end
 
     if cnd > 100
