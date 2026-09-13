@@ -27,7 +27,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cal_sweep import smu_open, smu_off, board_open, board_measure, ReadbackSampler
+from cal_sweep import (smu_open, smu_off, board_open, board_measure,
+                        ReadbackSampler, board_warmup)
 
 
 def default_points_pA():
@@ -70,15 +71,25 @@ def main():
             import time as _t
             _t.sleep(a.settle)
 
+            # 预热: 空跑一次丢弃 —— 每批第一次的坏率特别高 (见 cal_sweep.py
+            # 里 board_warmup 的注释: 五次独立实验都是"1 坏 2~n 好")
+            board_warmup(ser)
+
             dev, rb = [], []
-            for k in range(a.n):
+            tries = 0
+            while (len(dev) < a.n) and (tries < a.n * 3):
+                tries += 1
                 smp = ReadbackSampler(smu); smp.start()
                 d = board_measure(ser)
                 rb += smp.stop(10)
                 if d is None:
                     continue
+                # 丢弃被标 TIMEOUT 的 (拉回超时 / 首拍在轨) —— 坏点以前会静默
+                # 混进均值, 现在它能自己报出来, 这里补测
+                if d.get('timeout'):
+                    print("      (丢弃一次 TIMEOUT)"); continue
                 dev.append(float(d['i']))
-                rows.append(dict(set_pA=pA, rep=k + 1, mode=int(d['mode']),
+                rows.append(dict(set_pA=pA, rep=len(dev), mode=int(d['mode']),
                                  t_ms=int(d['t']) if d['t'] else 0,
                                  dev_nA=float(d['i']),
                                  dev_ext_nA=float(d['x']) if d['x'] else float('nan')))

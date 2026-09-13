@@ -38,7 +38,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cal_sweep import smu_open, smu_off, board_open, board_measure, ReadbackSampler
+from cal_sweep import (smu_open, smu_off, board_open, board_measure,
+                        ReadbackSampler, board_warmup)
 
 # 三个关键点: (峰值 nA, 占空比, 说明)
 KEY_POINTS = [
@@ -192,16 +193,24 @@ def main():
                     smu.write('smua.source.leveli = %.9e' % (i_avg * 1e-9))
                     time.sleep(2.0)
 
+                # 预热: 空跑一次丢弃 —— 每批第一次的坏率特别高
+                # (见 cal_sweep.py 里 board_warmup 的注释)
+                board_warmup(ser)
+
                 dev, rb = [], []
-                for k in range(a.n):
+                tries = 0
+                while (len(dev) < a.n) and (tries < a.n * 3):
+                    tries += 1
                     # 脉冲段不采回读 (见 measure_once 的注释); 直流段照采
                     d, r_avg = measure_once(ser, smu, sample_readback=(kind == 'dc'))
                     if d is None:
                         continue
+                    if d.get('timeout'):    # 坏点补测 (原来会静默混进均值)
+                        print("      (丢弃一次 TIMEOUT)"); continue
                     dev.append(float(d['i']))
                     rb.append(r_avg)
                     rows.append(dict(peak_nA=i_peak, duty=duty, avg_nA=i_avg,
-                                     kind=kind, rep=k + 1, mode=int(d['mode']),
+                                     kind=kind, rep=len(dev), mode=int(d['mode']),
                                      t_ms=int(d['t']) if d['t'] else 0,
                                      dev_nA=float(d['i']), rb_nA=r_avg * 1e9))
                 if not dev:

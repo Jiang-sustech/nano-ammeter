@@ -171,6 +171,23 @@ def board_measure(ser, timeout=40.0):
     return None
 
 
+def board_warmup(ser, timeout=40.0):
+    """预热: 空测一次并丢弃。
+
+    **为什么需要** (2026-09-13 实测): 一批测量里**第一次总是坏的** ——
+    五次独立实验都是"1 坏 2~6 好"。原因是空闲期积分器被输入电流推到轨上,
+    第一次的拉回相行程最长, 首拍最容易读到坏值(INT1 落在轨码)。
+    后面几次都从上一窗末端起步(在阈值之间), 行程短, 就不会。
+    所以每个测点前先空跑一次把它消耗掉。
+
+    返回值只用于打印, 不参与任何计算。
+    """
+    d = board_measure(ser, timeout)
+    if d is None:
+        return "预热: 无响应"
+    return "预热: %s%s" % (d['i'], " (TIMEOUT)" if d.get('timeout') else "")
+
+
 # ---------------------------------------------------------------- 主流程
 def main():
     ap = argparse.ArgumentParser()
@@ -216,8 +233,18 @@ def main():
             smu.write('smua.source.output = smu.OUTPUT_ON')
             time.sleep(a.settle)
 
+            # ---- 预热: 空跑一次并丢弃 ----
+            # 2026-09-13 五次独立实验都是"一批里**第一次坏**、后面全好":
+            # 空闲期积分器被输入电流推到轨上, 第一次的拉回相行程最长, 首拍最
+            # 容易读到坏值(INT1 落在轨码)。后面几次都从上一窗末端起步(在阈值
+            # 之间), 行程短就不会。空跑一次把它消耗掉。
+            print("   ", board_warmup(ser))
+
             dev_vals, rb_all = [], []
-            for k in range(a.n):
+            tries = 0
+            # 上限 a.n*3 次: 丢弃坏点后要补测, 但不能无限循环
+            while (len(dev_vals) < a.n) and (tries < a.n * 3):
+                tries += 1
                 smp = ReadbackSampler(smu)
                 smp.start()
                 try:
@@ -229,15 +256,25 @@ def main():
                     # **这次装置没应答, 那 10 个回读不能计入 I_true** ——
                     # 需求要的是"装置正在测的那段时间里的回读", 出错的这次根本
                     # 没在测。源稳时无所谓, 源在漂时会静默稀释标准值。
-                    print("    第%d次: ** 装置无响应/超时 ** (本次回读不计入)" % (k + 1))
+                    print("    第%d次: ** 装置无响应/超时 ** (本次回读不计入)" % tries)
                     continue
+
+                # ---- 丢弃被标 TIMEOUT 的测量 ----
+                # 2026-09-13 新接上的标记: 拉回相守卫超时, 或开窗首拍就落在轨码上
+                # —— 两种都意味着这一窗不可信。以前这类坏点会**静默混进**数据
+                # (实测首拍坏读率 1/6, 是平均坏读率的 200 倍), 现在它会自己报
+                # 出来, 这里就把它丢掉补测。
+                if d.get('timeout'):
+                    print("    第%d次: ** TIMEOUT (拉回超时/首拍在轨) -> 丢弃补测 **" % tries)
+                    continue
+
                 rb_all += picked
                 iread = float(d['i'])
                 dev_vals.append(iread)
                 print("    第%d次  装置 %+9.4f nA (MODE=%s T=%sms)   回读采了 %d 个   %s"
-                      % (k + 1, iread, d['mode'], d['t'], len(picked),
+                      % (tries, iread, d['mode'], d['t'], len(picked),
                          "有RAW" if d['m'] else "**无RAW**"))
-                rows.append(dict(point_nA=i_nA, rep=k + 1, mode=int(d['mode']),
+                rows.append(dict(point_nA=i_nA, rep=len(dev_vals), mode=int(d['mode']),
                                  t_ms=int(d['t']) if d['t'] else 0,
                                  dev_nA=iread,
                                  dev_ext_nA=float(d['x']) if d['x'] else float('nan'),
