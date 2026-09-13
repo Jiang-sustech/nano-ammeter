@@ -589,12 +589,24 @@ static void SmallI_Finish(void)
         sum_e /= (float)si_ring_n;
     }
 
-    /* I = C·(V_start - V_end)/T = q·(码_start - 码_end)/T */
+    /* I = C·(V_积分器_start - V_积分器_end)/T
+     *
+     * **注意码域与电压域是反的**: 电平移位是 V_adc = 1.55 - 0.33*V_o,
+     * 所以 Δcode = -0.33*ΔV_o*(65536/3.3) —— 积分器电压下降时码值上升。
+     * 因此把上式搬到码域时**必须把两项对调**:
+     *
+     *     I = q·(码_end - 码_start)/T
+     *
+     * 原来写的是 (si_start_int - sum_i), 等于把电压域的式子直接抄进码域,
+     * 漏了这一层反相 —— 整个小电流模式的符号因此翻转。
+     * 2026-09-13 实测确认: 2636B 给 +0.500 nA, 原代码读 -0.477 nA (3 次
+     * 一致 ±1%); 同一时刻模式一在 +2.000 nA 上读 +1.98 nA (符号正确)。
+     * 方向与模式一保持一致 (那边 dc = buf[end] - v_first)。 */
     t_s = (float)si_ticks * T_INT;
     if (t_s > 0.0f)
     {
-        si_cur_int = Cal_GetQ() * (si_start_int - sum_i) / t_s;
-        si_cur_ext = Cal_GetQ() * (si_start_ext - sum_e) / t_s;
+        si_cur_int = Cal_GetQ() * (sum_i - si_start_int) / t_s;
+        si_cur_ext = Cal_GetQ() * (sum_e - si_start_ext) / t_s;
     }
 
     window_current     = si_cur_int;
