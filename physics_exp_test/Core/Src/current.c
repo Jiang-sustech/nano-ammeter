@@ -96,7 +96,13 @@ static uint16_t ReadBoth(uint16_t *ext_out)
     uint16_t r_ext = ADS8866_ReadRaw();
 #endif
     t_ext_ns = (DWT->CYCCNT - c0) * 100U / 8U;
-    if (r_ext == 0xFFFFU) { ext_ffff_cnt++; }
+    if (r_ext == 0xFFFFU)
+    {
+        ext_ffff_cnt++;
+        /* 落在窗口前 10 拍内还是之外 (m+n 就是窗口内的拍序号) */
+        if ((m_count + n_count) < 10U) { ext_ffff_early++; }
+        else                           { ext_ffff_late++; }
+    }
 
 #if USE_INTERNAL_ADC
     /* ---- 两路都在: 用交叉判据区分"真撞轨"与"真断线" ---- */
@@ -151,6 +157,12 @@ static uint16_t ReadBoth(uint16_t *ext_out)
 volatile uint32_t t_int_ns;         /* 内置路单次读取耗时 (ns) */
 volatile uint32_t t_ext_ns;         /* 外部路单次读取耗时 (ns) */
 volatile uint32_t ext_ffff_cnt;     /* 外部路返回 0xFFFF 的累计次数 */
+/* 坏读落在窗口的哪儿 —— 用来分辨"开窗瞬间的突变"与"均匀散布":
+ *   实测首拍坏率 1/6 = 17%, 而平均坏率 0.085% —— 首拍高 200 倍。
+ *   若 early 占绝大多数 -> 坏读聚在开头, 是开窗瞬间的问题;
+ *   若 early 与 late 成比例 -> 首拍坏是巧合, 得另找原因。 */
+volatile uint32_t ext_ffff_early;   /* 其中落在窗口前 10 拍内的 */
+volatile uint32_t ext_ffff_late;    /* 其余 */
 
 uint16_t Current_ReadControl(void)
 {
@@ -720,6 +732,10 @@ void Current_PullToZero(void)
  * ============================================================ */
 #define MANUAL_POINTS   TOTAL_CYCLE     /* 6250 点; 受 voltage_buf 尺寸限制 */
 
+/* 正式记录前空读并丢弃几次 —— 手动模式的第一拍恒为 0, 见 Current_ManualRun
+ * 里的长注释。取 1 就够(实测只有第 1 拍坏); 留成宏便于上板后调整。 */
+#define MANUAL_PREROLL  1U
+
 /* 采样周期 (us)。back-to-back 跑 ReadBoth 的天然节拍约 23.6us (内置 8.2 +
  * ADS8866 约 15), 余下的用 DWT 补齐到 MANUAL_TICK_US。
  * 为什么要放慢: 快采时 ADS8866 的 SPI 跑得频繁, 实测噪声从模式一的 ~48 码
@@ -759,6 +775,24 @@ void Current_ManualRun(uint8_t sub)
     /* sub == 0: 保持断开, 不碰 ADG */
 
     npts = (sub == 3U) ? MANUAL_M3_POINTS : MANUAL_POINTS;
+
+    /* ---- 空读一次, 把它丢掉 ---- (2026-09-13 加, **待上板验证**)
+     *
+     * 实测: 手动模式的**第一拍恒为 0** —— raw_09_13_M0 与 M3 两个独立文件、
+     * 不同子模式, 签名完全相同(i=0 -> 0, i=1 起立刻回到 30833/30835 正常值),
+     * 是**确定性**的而非随机干扰。
+     *
+     * 为什么只有手动模式坏: mode 1 的拉回相跑在 ISR 节拍上, 拉回结束到开窗
+     * **整整隔一拍(160us)**; 而手动模式是"阻塞 PullToZero 的最后一次读 ->
+     * 立刻连采", 几乎背靠背 —— ADS8866 那一次转换被扰动, 送出无效码 0x0000。
+     * (排除了另外两种解释: SPI 守卫超时 —— E 行的 TXE/RXNE/BSY 全为 0;
+     *  节点真在 0 —— 次拍立刻回到 30500, 节点根本没动过。)
+     *
+     * 为什么是"空读一次"而不是"分析时丢掉首点": M0 要观测的正是**断开瞬间**
+     * 的衰减, 首点就是事件本身, 丢不得 —— 得让固件多读一次把坏的那次顶掉。
+     * 代价 18us: 丢掉静置后最开头那 18us (对 tau~490us 是 3.7%, 比坏掉的首点
+     * 好得多)。 */
+    for (i = 0U; i < MANUAL_PREROLL; i++) { (void)ReadBoth(&ext); }
 
     /* ---- 连续采样 (阻塞, 周期由 DWT 补齐到 MANUAL_TICK_US) ---- */
     sample_index = 0U;

@@ -138,6 +138,9 @@ uint32_t Current_GetExtBadRead(void);            /* 外部 ADC 坏读计数 (0x0
 extern volatile uint32_t t_int_ns;      /* 内置路单次读取耗时 (ns); USE_INTERNAL_ADC=0 时为 0 */
 extern volatile uint32_t t_ext_ns;      /* 外部路单次读取耗时 (ns) */
 extern volatile uint32_t ext_ffff_cnt;  /* 外部路返回 0xFFFF 的累计次数 */
+/* 坏读落在窗口的哪儿 —— 分辨"开窗瞬间的突变"与"均匀散布" (见 current.c 的注释) */
+extern volatile uint32_t ext_ffff_early;    /* 落在窗口前 10 拍内的 */
+extern volatile uint32_t ext_ffff_late;     /* 其余 */
 uint32_t Current_GetMCount(void);           /* 最近完整窗口 POS 周期数 (标定用) */
 uint32_t Current_GetNCount(void);           /* 最近完整窗口 NEG 周期数 (标定用) */
 uint16_t Current_GetMinCode(void);          /* 最近窗口最小码 = 下阈值切换点 (标定用) */

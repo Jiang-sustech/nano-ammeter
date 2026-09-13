@@ -223,7 +223,7 @@ static void UART_SendExtDiag(void)
     char line[128];
 
     sprintf(line, "EXT N=%lu ERR=%lu TXE=%lu RXNE=%lu BSY=%lu PRE=%lu "
-                  "TINT=%luns TEXT=%luns FFFF=%lu\r\n",
+                  "TINT=%luns TEXT=%luns FFFF=%lu F0=%lu FL=%lu\r\n",
             (unsigned long)Current_GetSampleCount(),
             (unsigned long)Current_GetExtBadRead(),
             (unsigned long)ads_spi_txe_timeout,
@@ -232,7 +232,9 @@ static void UART_SendExtDiag(void)
             (unsigned long)precond_timeout,
             (unsigned long)t_int_ns,        /* 时序实测: 内置路单次耗时 */
             (unsigned long)t_ext_ns,        /*           外部路单次耗时 */
-            (unsigned long)ext_ffff_cnt);   /* 外部路返回 0xFFFF 的次数 */
+            (unsigned long)ext_ffff_cnt,    /* 外部路 0xFFFF 总次数 */
+            (unsigned long)ext_ffff_early,  /* 其中落在窗口前 10 拍内 */
+            (unsigned long)ext_ffff_late);  /* 其余 */
     UART_SendString(line);
 }
 /* USER CODE END 0 */
