@@ -31,14 +31,21 @@ from cal_sweep import (smu_open, smu_off, board_open, board_measure,
                         ReadbackSampler, board_warmup)
 
 
-def default_points_pA():
-    """需求③ 的点表, 单位 pA。相邻区间不重复取边界点。"""
+def default_points_pA(both=False):
+    """需求③ 的点表, 单位 pA。相邻区间不重复取边界点。
+
+    both=True 时**镜像出负向** (需求③原文只列了正电流, 但全量程表征缺了
+    负向是不完整的 —— 正负不对称直接反映 I₊/I₋ 的不匹配)。
+    """
     pts = []
     pts += list(range(1, 11))                  # 1..10 pA      (10 点)
     pts += list(range(20, 101, 10))            # 20..100 pA    (9 点)
     pts += list(range(200, 1001, 100))         # 200..1000 pA  (9 点)
     pts += list(range(2000, 10001, 1000))      # 2..10 nA      (9 点)
     pts += [12500 + 2500 * i for i in range(12)]   # 12.5..40 nA (12 点)
+    if both:
+        # 镜像: 顺序上正负交替容易被 2636B 的换向整定打断, 所以整段接在后面
+        pts = pts + [-x for x in pts]
     return pts
 
 
@@ -48,12 +55,17 @@ def main():
     ap.add_argument('--port', default=None)
     ap.add_argument('--points', default=None,
                     help='逗号分隔, 单位 **pA**。默认按需求③的表')
+    ap.add_argument('--both', action='store_true',
+                    help='正负都测 (把默认点表镜像到负向, 点数翻倍)' +
+                         ' —— 需求③原文只列了正电流, 但正负不对称直接反映 '
+                         'I+/I- 的不匹配, 全量程表征建议打开')
     ap.add_argument('--n', type=int, default=3)
     ap.add_argument('--settle', type=float, default=3.0)
     ap.add_argument('-o', '--out', default='data/sweep_broad.csv')
     a = ap.parse_args()
 
-    pts_pA = ([float(x) for x in a.points.split(',')] if a.points else default_points_pA())
+    pts_pA = ([float(x) for x in a.points.split(',')] if a.points
+              else default_points_pA(both=a.both))
 
     print("=" * 70)
     print("广泛测试扫描   %d 点 x %d 次" % (len(pts_pA), a.n))
@@ -198,20 +210,60 @@ def main():
     plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'DejaVu Sans']
     plt.rcParams['axes.unicode_minus'] = False
 
-    fig, ax = plt.subplots(1, 2, figsize=(13.5, 5.5))
+    fig, ax = plt.subplots(2, 2, figsize=(14, 10))
     xpA = [abs(x) * 1e3 for x in xs]
-    ax[0].semilogx(xpA, es, 'o-', ms=5, color='C3', label='相对**回读值** (= 准确度)')
-    ax[0].semilogx(xpA, ef, 's--', ms=4, color='C0', label='相对**拟合直线** (= 非线性)')
-    ax[0].axhline(0, color='k', ls='--', lw=1)
-    ax[0].set_xlabel('电流 (pA)'); ax[0].set_ylabel('相对误差 (%)')
-    ax[0].set_title('两条误差曲线 (同一批数据, 两个不同的量)')
-    ax[0].grid(alpha=.3, which='both'); ax[0].legend(fontsize=8)
+    pos = [i for i, x in enumerate(xs) if x >= 0]
+    neg = [i for i, x in enumerate(xs) if x < 0]
 
-    ax[1].loglog([abs(x) for x in xs], [abs(y) for y in ys], 'o', ms=5, label='读数')
-    lim = [min(abs(x) for x in xs), max(abs(x) for x in xs)]
-    ax[1].loglog(lim, lim, 'k--', lw=1, label='理想 1:1')
-    ax[1].set_xlabel('真值 (nA)'); ax[1].set_ylabel('读数 (nA)')
-    ax[1].set_title('输入—输出 (对数)'); ax[1].grid(alpha=.3, which='both'); ax[1].legend()
+    # [0,0] 误差曲线 —— 正负分开画 (log 轴放不下负数, 而且分开才看得到不对称)
+    for idx, lab, col in ((pos, '正电流', 'C3'), (neg, '负电流', 'C0')):
+        if not idx:
+            continue
+        ax[0, 0].semilogx([xpA[i] for i in idx], [es[i] for i in idx],
+                          'o-', ms=4, color=col, label='%s 准确度' % lab)
+        ax[0, 0].semilogx([xpA[i] for i in idx], [ef[i] for i in idx],
+                          's--', ms=3, color=col, alpha=.55, label='%s 非线性' % lab)
+    ax[0, 0].axhline(0, color='k', ls='--', lw=1)
+    ax[0, 0].set_xlabel('|电流| (pA)'); ax[0, 0].set_ylabel('相对误差 (%)')
+    ax[0, 0].set_title('误差曲线 (准确度 vs 非线性; 正负分开)')
+    ax[0, 0].grid(alpha=.3, which='both'); ax[0, 0].legend(fontsize=7)
+
+    # [0,1] 输入—输出
+    if pos:
+        ax[0, 1].loglog([abs(xs[i]) for i in pos], [abs(ys[i]) for i in pos],
+                        'o', ms=5, color='C3', label='正电流')
+    if neg:
+        ax[0, 1].loglog([abs(xs[i]) for i in neg], [abs(ys[i]) for i in neg],
+                        's', ms=5, mfc='none', color='C0', label='负电流')
+    lim = [min(abs(v) for v in xs), max(abs(v) for v in xs)]
+    ax[0, 1].loglog(lim, lim, 'k--', lw=1, label='理想 1:1')
+    ax[0, 1].set_xlabel('|真值| (nA)'); ax[0, 1].set_ylabel('|读数| (nA)')
+    ax[0, 1].set_title('输入—输出 (绝对值, 对数)')
+    ax[0, 1].grid(alpha=.3, which='both'); ax[0, 1].legend(fontsize=8)
+
+    # ---- [1,0] / [1,1] 残差直方图 —— 横轴是**误差比例** ----
+    # 散点图看不出"偏置"和"分布形态", 直方图可以:
+    #   峰是否落在 0      -> 有没有系统性偏置
+    #   均值是几个 σ      -> 偏置是否显著
+    #   尾部有多厚        -> 离群点比例
+    for k, (arr, name) in enumerate(((es, '准确度'), (ef, '非线性'))):
+        v = [x for x in arr if math.isfinite(x)]
+        if not v:
+            continue
+        a2 = ax[1, k]
+        nbin = max(8, min(40, int(len(v) ** 0.5) + 2))
+        a2.hist(v, bins=nbin, color=('C3' if k == 0 else 'C0'),
+                alpha=.75, edgecolor='k', lw=.5)
+        mu = sum(v) / len(v)
+        sd = (sum((x - mu) ** 2 for x in v) / max(len(v) - 1, 1)) ** 0.5
+        a2.axvline(0, color='k', ls='--', lw=1, label='0')
+        a2.axvline(mu, color='r', lw=1.5, label='均值 %+.4f%%' % mu)
+        a2.set_xlabel('%s残差 (%%) —— 相对%s'
+                      % (name, '回读值' if k == 0 else '拟合直线 a·回读+b'))
+        a2.set_ylabel('点数')
+        a2.set_title('%s残差分布  N=%d  σ=%.4f%%  均值/σ=%.2f'
+                     % (name, len(v), sd, (mu / sd) if sd else float('nan')))
+        a2.grid(alpha=.3); a2.legend(fontsize=8)
     fig.tight_layout()
     png = a.out.replace('.csv', '_fit.png')
     fig.savefig(png, dpi=150)

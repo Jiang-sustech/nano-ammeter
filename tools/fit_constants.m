@@ -290,30 +290,47 @@ function local_plot(T, o)
     f = o.I_fit * 1e12;
     r = o.resid * 1e12;
 
-    figure('Position', [100 100 1000 700]);
+    figure('Position', [80 80 1500 760]);
 
-    subplot(2,2,1);
+    subplot(2,3,1);
     loglog(abs(y), abs(f), 'o'); hold on;
     lim = [min(abs(y)) max(abs(y))];
     loglog(lim, lim, 'k--');
     grid on; xlabel('I_{true} (pA)'); ylabel('I_{fit} (pA)');
     title('拟合 vs 已知输入');
 
-    subplot(2,2,2);
+    subplot(2,3,2);
     plot(y, r, 'o'); hold on; yline(0, 'k--'); grid on;
     xlabel('I_{true} (pA)'); ylabel('残差 (pA)');
     title(sprintf('残差  RMSE = %.3g pA', o.rmse*1e12));
 
-    subplot(2,2,3);
-    plot(y, r ./ max(abs(y), eps) * 100, 'o'); hold on;
+    subplot(2,3,3);
+    rel = r ./ max(abs(y), eps) * 100;          % 相对残差 (%)
+    plot(y, rel, 'o'); hold on;
     yline(0, 'k--'); grid on;
-    xlabel('I_{true} (pA)'); ylabel('相对残差 (%)');
-    title('相对残差');
+    xlabel('I_{true} (pA)'); ylabel('残差比例 (%)');
+    title('残差 vs 输入');
 
-    subplot(2,2,4);
+    subplot(2,3,4);
     bar([abs(o.I_neg), abs(o.I_pos)]*1e9); grid on;
     set(gca, 'XTickLabel', {'|I-|','|I+|'});
     ylabel('nA'); title('拟合出的参考电流');
+
+    % ---- 残差直方图: 横轴 = 误差比例 ----
+    % 散点图看不出"偏置"和"分布形态", 直方图可以:
+    %   峰是否落在 0    -> 有没有系统性偏置
+    %   均值是几个 σ    -> 偏置是否显著 (|均值/σ| < 2 基本就是无偏)
+    %   尾部有多厚      -> 离群点比例
+    subplot(2,3,5);
+    nb = max(6, min(30, round(sqrt(numel(rel))) + 2));
+    histogram(rel, nb, 'FaceColor', [0.30 0.55 0.85]);
+    hold on;
+    xline(0,  'k--', 'LineWidth', 1);
+    mu = mean(rel); sd = std(rel);
+    xline(mu, 'r-',  'LineWidth', 1.5);
+    grid on; xlabel('残差比例 (%)'); ylabel('点数');
+    title(sprintf('残差分布  N=%d  \\sigma=%.4g%%  均值/\\sigma=%.2f', ...
+                  numel(rel), sd, mu/max(sd, eps)));
 
     sgtitle('式(6) 物理常数最小二乘拟合');
 end
