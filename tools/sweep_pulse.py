@@ -66,7 +66,8 @@ def build_pulse_tsp(i_peak, ton, toff, n_pulse):
 def pulse_start(smu, i_peak, duty, n_pulse):
     ton = PERIOD_S * duty
     toff = PERIOD_S - ton
-    smu_set(smu, i_peak)           # 档位要覆盖**峰值** (200nA 峰值 -> 1uA 档)
+    prng = smu_set(smu, i_peak)    # 档位要覆盖**峰值** (200nA 峰值 -> 1uA 档)
+    print("      脉冲段 峰值 %.4g nA -> 档位 %.4g A" % (i_peak * 1e9, prng))
     smu.write(build_pulse_tsp(i_peak, ton, toff, n_pulse))
     smu.write('InitiatePulseTest(1)')
     return ton, toff
@@ -191,6 +192,10 @@ def main():
                     time.sleep(0.2)
                     smu.write('smua.source.output = smu.OUTPUT_ON')
                     rng = smu_set(smu, i_avg * 1e-9)
+                    # 档位要记: 脉冲段是按**峰值**选的档(200nA 峰值 -> 1uA 档),
+                    # 与直流段按均值选的档**不同** -> E3 比较时要留意这一点
+                    print("      直流段 档位 %.4g A (脉冲段按峰值 %.4g nA 选的档可能不同)"
+                          % (rng, i_peak))
                     time.sleep(2.0)
 
                 # 预热: 空跑一次丢弃 —— 每批第一次的坏率特别高
