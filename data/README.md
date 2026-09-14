@@ -32,12 +32,22 @@
 
 ## 二、派生结果
 
-| 文件 | 内容 |
-|---|---|
-| `fit_data.csv` | 36 行，`I_true,c1,c2,m,n` —— 三常数最小二乘的输入 |
-| `linearity.png` | 图 4-2：未校准输入—输出关系 + 残差（对应 4.3.3） |
-| `M3_waveform.png` | M3 高阻↔+5V 交替波形（用于量寄生电容 `C_p`） |
-| `node_decay_sim.png` | 100 MΩ 输入端节点的电压仿真（判断示波器探头电容的影响） |
+| 文件 | 内容 | 生成方式 |
+|---|---|---|
+| `fit_data.csv` | 36 行，`I_true,c1,c2,m,n` —— 三常数最小二乘的输入 | `tools/make_fit_csv.py` |
+| `linearity.png` | 图 4-2：未校准输入—输出关系 + 残差（对应 4.3.3） | `tools/fit_linearity.py` |
+| `residual_fit.png` | 三常数最小二乘的 2×3 图（含残差比例直方图）。RMSE 1.5 pA、N=36 | `tools/fit_constants.m` |
+| `M3_waveform.png` | M3 高阻↔+5V 交替波形（用于量寄生电容 `C_p`） | 一次性调查 |
+| `node_decay_sim.png` | 100 MΩ 输入端节点的电压仿真（判断示波器探头电容的影响） | `tools/sim_node_decay.py` |
+| `badread_M0.png` | M0（参考断开）整窗：6250 点里**只有 i=0 一个坏读**（值 = 0），及其 ±50 点放大 | 一次性调查 |
+| `badread_first_sample.png` | 同上，并排 M0 与 M3（400 点里 31 个坏读）。用于定性"首拍坏读" | 一次性调查 |
+| `demo_hist.png` | **原型图**：修正前/修正后两张残差直方图 + 误差曲线 + 输入输出 | 一次性原型 |
+
+> `demo_hist.png` 的用途已被 `tools/sweep_broad.py` 的 `sweep_broad_fit.png` 取代
+> （后者对同一口径做了正式实现），此处只作留档。
+>
+> 标了"一次性调查/原型"的三张**没有生成脚本**，是当时用临时命令画出来判断问题的。
+> 结论已进 `docs/`，图留在这里备查；要重画得照结论重写脚本。
 
 ## 三、关键结论（详见根 README 与 docs/）
 
