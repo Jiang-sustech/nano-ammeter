@@ -185,17 +185,31 @@ def main():
     lines.append("    K 明显非 0 -> 误差随电流变化, 小电流端更差 (偏向偏移型)")
     lines.append("")
     lines.append("逐点:")
-    lines.append("  **两个误差是两回事**: 对回读值 = 准确度; 对拟合直线 = 非线性")
-    lines.append("  %11s %13s %13s %11s %11s %6s"
-                 % ("设定(pA)", "回读(nA)", "读数(nA)", "准确度%", "非线性%", "MODE"))
-    ef = []
-    for x, y in zip(xs, ys):
-        fit = A * x + B
-        ef.append((y - fit) / fit * 100 if fit else float('nan'))
+    lines.append("  **修正前/修正后是同一件事的两个阶段**:")
+    lines.append("    修正前 = (读数 - 回读)/回读;   修正后 = ((读数-a·回读-b)/a)/回读")
+    lines.append("  %11s %13s %13s %12s %12s %6s"
+                 % ("设定(pA)", "回读(nA)", "读数(nA)", "修正前%", "修正后%", "MODE"))
+    # 修正后误差 = (修正值 - 回读)/回读 —— 与直方图②同一口径 (原来是"相对拟合直线",
+    # 分母不同, 现在统一)
+    ef = [(((y - B) / A - x) / x * 100 if x else float('nan'))
+          for x, y in zip(xs, ys)]
     for pA, x, y, e, f, m in zip(pts_have, xs, ys, es, ef, modes):
-        lines.append("  %11.4g %13.6f %13.6f %+11.3f %+11.4f %6d" % (pA, x, y, e, f, m))
-    lines.append("  最大 |准确度| = %.3f %%   最大 |非线性| = %.4f %%   <- 通常差 1~2 个数量级"
-                 % (max(abs(v) for v in es), max(abs(v) for v in ef)))
+        lines.append("  %11.4g %13.6f %13.6f %+12.3f %+12.4f %6d" % (pA, x, y, e, f, m))
+    mr, mc = sum(es) / len(es), sum(ef) / len(ef)
+    sr = (sum((v - mr) ** 2 for v in es) / max(len(es) - 1, 1)) ** 0.5
+    sc = (sum((v - mc) ** 2 for v in ef) / max(len(ef) - 1, 1)) ** 0.5
+    lines.append("")
+    lines.append("  %-8s %12s %12s %12s" % ("", "均值(偏置)", "σ(散布)", "均值/σ"))
+    lines.append("  %-8s %+11.4f%% %11.4f%% %12.2f" % ("修正前", mr, sr, mr / sr))
+    lines.append("  %-8s %+11.4f%% %11.4f%% %12.2f" % ("修正后", mc, sc, mc / sc))
+    lines.append("")
+    lines.append("  判读: |均值/σ| > 2 就是**显著的系统偏置**(必须修); < 2 视作无偏。")
+    lines.append("  注意 **增益/偏移修正只消偏置, 不动散布** —— 所以 σ 基本不变是对的;")
+    lines.append("       期望看到的是**均值大幅下降**, 而不是 σ 下降。")
+    lines.append("  本次: 偏置 %+.4f%% -> %+.4f%% (压低 %.0f 倍), 散布 %.4f%% -> %.4f%%"
+                 % (mr, mc, abs(mr / mc) if mc else float('nan'), sr, sc))
+    lines.append("  (注: 修正用的 a/b 是从**同一批数据**拟合的 -> 这里的改善偏乐观;")
+    lines.append("   真正证明有效性要靠 4.6 节的独立验证点。见 docs 第4章。)")
 
     reg_out = a.out.replace('.csv', '_reg.txt')
     with open(reg_out, 'w', encoding='utf-8') as f:
@@ -220,12 +234,12 @@ def main():
         if not idx:
             continue
         ax[0, 0].semilogx([xpA[i] for i in idx], [es[i] for i in idx],
-                          'o-', ms=4, color=col, label='%s 准确度' % lab)
+                          'o-', ms=4, color=col, label='%s 修正前' % lab)
         ax[0, 0].semilogx([xpA[i] for i in idx], [ef[i] for i in idx],
-                          's--', ms=3, color=col, alpha=.55, label='%s 非线性' % lab)
+                          's--', ms=3, color=col, alpha=.55, label='%s 修正后' % lab)
     ax[0, 0].axhline(0, color='k', ls='--', lw=1)
     ax[0, 0].set_xlabel('|电流| (pA)'); ax[0, 0].set_ylabel('相对误差 (%)')
-    ax[0, 0].set_title('误差曲线 (准确度 vs 非线性; 正负分开)')
+    ax[0, 0].set_title('误差曲线 (修正前 vs 修正后; 正负分开)')
     ax[0, 0].grid(alpha=.3, which='both'); ax[0, 0].legend(fontsize=7)
 
     # [0,1] 输入—输出
@@ -241,12 +255,25 @@ def main():
     ax[0, 1].set_title('输入—输出 (绝对值, 对数)')
     ax[0, 1].grid(alpha=.3, which='both'); ax[0, 1].legend(fontsize=8)
 
-    # ---- [1,0] / [1,1] 残差直方图 —— 横轴是**误差比例** ----
+    # ---- [1,0] / [1,1] 两张残差直方图 —— 横轴是**误差百分比** ----
+    # 用户指定要这一对 (不是"准确度/非线性", 而是"修正前/修正后"):
+    #   ① 直接输出值 vs 回读平均值      -> 修正前的原始误差
+    #   ② 修正值     vs 回读值          -> 修正后还剩多少
+    # 两张放一起才是完整证据链: 一眼看出修正把误差从多少压到了多少。
+    #
     # 散点图看不出"偏置"和"分布形态", 直方图可以:
-    #   峰是否落在 0      -> 有没有系统性偏置
-    #   均值是几个 σ      -> 偏置是否显著
-    #   尾部有多厚        -> 离群点比例
-    for k, (arr, name) in enumerate(((es, '准确度'), (ef, '非线性'))):
+    #   峰是否落在 0   -> 有没有残留的系统偏置
+    #   均值是几个 σ   -> 偏置是否显著 (|均值/σ| < 2 基本就是无偏)
+    #   尾部有多厚     -> 离群点比例
+    #
+    # ⚠️ 修正用的 a/b 是**从同一批数据拟合出来的** -> 第二张图是**样本内**结果,
+    #    会偏乐观。真正证明有效性要靠 4.6 节的**独立验证点**(未参与拟合)。
+    d_raw = [(y - x) / x * 100 for x, y in zip(xs, ys)]
+    d_cor = [(((y - B) / A - x) / x * 100) for x, y in zip(xs, ys)]
+
+    for k, (arr, name, sub) in enumerate((
+            (d_raw, '修正前', '直接输出值 vs 回读平均值'),
+            (d_cor, '修正后', '修正值 (读数-b)/a vs 回读值'))):
         v = [x for x in arr if math.isfinite(x)]
         if not v:
             continue
@@ -258,10 +285,9 @@ def main():
         sd = (sum((x - mu) ** 2 for x in v) / max(len(v) - 1, 1)) ** 0.5
         a2.axvline(0, color='k', ls='--', lw=1, label='0')
         a2.axvline(mu, color='r', lw=1.5, label='均值 %+.4f%%' % mu)
-        a2.set_xlabel('%s残差 (%%) —— 相对%s'
-                      % (name, '回读值' if k == 0 else '拟合直线 a·回读+b'))
+        a2.set_xlabel('误差百分比 (%%) —— %s' % sub)
         a2.set_ylabel('点数')
-        a2.set_title('%s残差分布  N=%d  σ=%.4f%%  均值/σ=%.2f'
+        a2.set_title('%s  N=%d  σ=%.4f%%  均值/σ=%.2f'
                      % (name, len(v), sd, (mu / sd) if sd else float('nan')))
         a2.grid(alpha=.3); a2.legend(fontsize=8)
     fig.tight_layout()
