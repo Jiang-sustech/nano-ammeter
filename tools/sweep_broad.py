@@ -28,7 +28,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cal_sweep import (smu_open, smu_off, board_open, board_measure,
-                        ReadbackSampler, board_warmup)
+                        ReadbackSampler, board_warmup, smu_set)
 
 
 def default_points_pA(both=False):
@@ -78,7 +78,8 @@ def main():
     rows = []
     try:
         for pA in pts_pA:
-            smu.write('smua.source.leveli = %.9e' % (pA * 1e-12))
+            rng = smu_set(smu, pA * 1e-12)
+            _rng = "%.3g A" % rng
             smu.write('smua.source.output = smu.OUTPUT_ON')
             import time as _t
             _t.sleep(a.settle)
@@ -116,8 +117,8 @@ def main():
                     r['true_nA'] = rav
                     r['dev_avg_nA'] = dav
                     r['err_pct'] = err
-            print("  %-9.4g pA  装置 %+11.6f nA  源表 %+11.6f nA  误差 %+8.3f %%  (MODE=%d)"
-                  % (pA, dav, rav, err, rows[-1]['mode']))
+            print("  %-9.4g pA  装置 %+11.6f nA  源表 %+11.6f nA  误差 %+8.3f %%  (MODE=%d, 档位 %s)"
+                  % (pA, dav, rav, err, rows[-1]['mode'], _rng))
     finally:
         print("\n关源表输出")
         smu_off(smu)

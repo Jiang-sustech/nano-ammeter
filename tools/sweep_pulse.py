@@ -39,7 +39,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cal_sweep import (smu_open, smu_off, board_open, board_measure,
-                        ReadbackSampler, board_warmup)
+                        ReadbackSampler, board_warmup, smu_set)
 
 # 三个关键点: (峰值 nA, 占空比, 说明)
 KEY_POINTS = [
@@ -66,7 +66,7 @@ def build_pulse_tsp(i_peak, ton, toff, n_pulse):
 def pulse_start(smu, i_peak, duty, n_pulse):
     ton = PERIOD_S * duty
     toff = PERIOD_S - ton
-    smu.write('smua.source.leveli = %.9e' % i_peak)
+    smu_set(smu, i_peak)           # 档位要覆盖**峰值** (200nA 峰值 -> 1uA 档)
     smu.write(build_pulse_tsp(i_peak, ton, toff, n_pulse))
     smu.write('InitiatePulseTest(1)')
     return ton, toff
@@ -135,7 +135,7 @@ def main():
         print("即将下发:")
         print("   ", cmd)
         try:
-            smu.write('smua.source.leveli = %.9e' % i_peak)
+            smu_set(smu, i_peak)
             smu.write('smua.source.output = smu.OUTPUT_ON')
             smu.write(cmd)
             print("配置成功。仪器回读:")
@@ -190,7 +190,7 @@ def main():
                         pass
                     time.sleep(0.2)
                     smu.write('smua.source.output = smu.OUTPUT_ON')
-                    smu.write('smua.source.leveli = %.9e' % (i_avg * 1e-9))
+                    rng = smu_set(smu, i_avg * 1e-9)
                     time.sleep(2.0)
 
                 # 预热: 空跑一次丢弃 —— 每批第一次的坏率特别高

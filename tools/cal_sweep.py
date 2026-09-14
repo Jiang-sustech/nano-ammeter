@@ -68,7 +68,30 @@ RESULT_RE = re.compile(
 
 
 # ---------------------------------------------------------------- 源表 (pyvisa)
-def smu_open(res):
+# 2636B 的低电流源档位与精度 (手册):
+#   档位     源精度(1年,23±5C)        回读精度
+#    1 nA   ±(0.15% rdg +  2 pA)     ±(0.15% + 240 fA)
+#   10 nA   ±(0.15% rdg +  5 pA)     ±(0.15% +   3 pA)
+#  100 nA   ±(0.06% rdg + 50 pA)     ±(0.06% +  40 pA)
+#
+# **固定误差项随档位变化很大** —— 拿 2 nA 这个点算:
+#     100 nA 档 -> ±(0.06%x2nA + 50pA) = ±51 pA   (2.5%!)
+#      10 nA 档 -> ±(0.15%x2nA +  5pA) = ± 8 pA   (0.4%)
+# 差 6 倍。所以**必须显式选档, 不能靠 autorange** —— 否则参考源自己成了
+# 限制环节, 违背"准确度由校准标准决定"这个前提。
+SMU_RANGES = (1e-9, 10e-9, 100e-9, 1e-6, 10e-6, 100e-6, 1e-3, 10e-3, 100e-3, 1e0, 3e0)
+
+
+def best_range(i_amp):
+    """选能覆盖该电流的**最小**档位 (固定误差项最小)。超出最大档返回 None。"""
+    a = abs(i_amp)
+    for r in SMU_RANGES:
+        if a <= r:
+            return r
+    return None
+
+
+def smu_open(res, force_range=None):
     rm = pyvisa.ResourceManager('@py')      # 纯 Python 后端, 不需要 NI-VISA
     smu = rm.open_resource(res)
     smu.read_termination = '\n'
@@ -77,10 +100,47 @@ def smu_open(res):
     print("    型号:", smu.query('print(localnode.model)').strip())
     smu.write('smua.reset()')
     smu.write('smua.source.func = smua.OUTPUT_DCAMPS')
+    # **用 autorange** —— 官方默认, 而且它会挑能覆盖设定值的最小档 (最优)。
+    # 唯一要做的额外事情是**把实际用的档位查出来记录**(见 smu_set 的注释:
+    # 100 nA 档的固定项 50 pA vs 10 nA 档的 5 pA, 差 6 倍)。
     smu.write('smua.source.autorangei = smua.AUTORANGE_ON')
+    smu.write('smua.measure.autorangei = smua.AUTORANGE_ON')
     smu.write('smua.source.limitv = 20')     # 输入是虚地, 20V 余量足够
     smu.write('smua.source.output = smu.OUTPUT_OFF')
     return smu
+
+
+def smu_set(smu, i_amp, force_range=None):
+    """设定电流, 并**返回仪器实际用的档位**。
+
+    档位策略 —— 交回给仪器的 autorange:
+      官方手册: 四个功能(源电压/源电流/测电压/测电流)的自动量程各自独立、
+      **默认全开**; 测同一种功能时测量档自动锁定与源档一致。autorange 会挑
+      **能覆盖设定值的最小档**, 那正是我们想要的(固定误差项最小)。
+      所以不必硬设 —— 硬设反而可能挡住仪器自适应。
+
+    **但档位必须记录下来**: 2636B 的固定误差项随档位差很多
+        1 nA 档 ±2 pA | 10 nA 档 ±5 pA | **100 nA 档 ±50 pA**
+      拿 2 nA 说, 若落在 100 nA 档就是 ±51 pA = 2.5%, 落在 10 nA 档只有
+      ±8 pA = 0.4% —— 差 6 倍。写进不确定度预算时必须知道当时是哪个档。
+      所以这里**查** smua.source.rangei 并返回, 不靠猜。
+
+    force_range: 少数场合要强制(比如脉冲的档位必须覆盖**峰值**而不是平均值),
+      传了就关掉 autorange 并显式设档。
+    """
+    r = force_range if force_range is not None else best_range(i_amp)
+    if r is None:
+        raise ValueError("设定值 %.4g A 超出 2636B 最大档 3 A" % i_amp)
+    smu.write('smua.source.leveli = %.9e' % i_amp)
+    if force_range is not None:
+        smu.write('smua.source.autorangei = smua.AUTORANGE_OFF')
+        smu.write('smua.source.rangei = %.9e' % force_range)
+    # 查实际档位 (autorange 选出来的, 或上面强制设的)
+    try:
+        actual = float(smu.query('print(smua.source.rangei)'))
+    except Exception:
+        actual = r
+    return actual
 
 
 def smu_off(smu):
@@ -229,7 +289,8 @@ def main():
         for i_nA in pts:
             print()
             print("── 设定 %+.4f nA " % i_nA + "─" * 46)
-            smu.write('smua.source.leveli = %.9e' % (i_nA * 1e-9))
+            rng = smu_set(smu, i_nA * 1e-9)
+            print("   档位 %.4g A (固定项 ~%.4g pA)" % (rng, rng*0.005*1e12))
             smu.write('smua.source.output = smu.OUTPUT_ON')
             time.sleep(a.settle)
 
