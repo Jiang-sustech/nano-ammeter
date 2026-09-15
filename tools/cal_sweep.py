@@ -123,7 +123,17 @@ def smu_open(res):
     # 记录** (见 smu_set: 回读固定项 240 fA/3 pA/40 pA 随档位变, 进预算要用)。
     smu.write('smua.source.autorangei = smua.AUTORANGE_ON')
     smu.write('smua.measure.autorangei = smua.AUTORANGE_ON')
-    smu.write('smua.source.limitv = 20')     # 输入是虚地, 20V 余量足够
+    # 顺从电压。2026-09-15 由 20V 调低到 5V, 两条理由:
+    #   ① 安全: 模拟前级跑在 ±5V 上 (ADG1219 在 ±5V/100MΩ 间切)。**limitv 不该
+    #      超过被测电路的电源轨** —— 输入开路时源表会顶到 limitv, 20V 灌进
+    #      ADA4530-1 会让输入保护二极管全导通。
+    #   ② 实测余量够: 用户观察 2 nA 时输出电压仅 0.5V (输入是虚地)。
+    #
+    # ⚠️ 但这条**待验证**: "0.5V" 是线性的(→45nA 需 11V) 还是固定偏置(→永远
+    #    ~0.5V), 两种假设给出相反结论, 靠推算分不出来。36 点标定在 20V 下全通过,
+    #   两个假设都解释得通。验证方法: 设 +45 nA, 读 smua.measure.v()。
+    #   若读到接近 5V, 说明要调回 20V 并查输入级。
+    smu.write('smua.source.limitv = 5')
     smu.write('smua.source.output = smu.OUTPUT_OFF')
     return smu
 
