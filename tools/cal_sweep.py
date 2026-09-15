@@ -364,6 +364,25 @@ def board_measure(ser, timeout=40.0):
     return None
 
 
+def board_set_window(ser, ms):
+    """下发 T<ms> 强制窗口长度; ms=0 回到自动。返回装置的回显行。
+
+    **为什么需要** (2026-09-15 用户要求): 1~20 pA 那一段 10s 窗口信噪比不够,
+    要 50s。而固件的自动切换是按幅值判的 —— 20 pA 与 50 pA 都 <1nA, 区分不开,
+    所以必须由上位机按**设定值**指定。
+
+    ⚠️ 用完之后记得 board_set_window(ser, 0) 复位, 否则后面的点也一直用长窗口。
+    """
+    ser.reset_input_buffer()
+    ser.write(('T%d\n' % int(ms)).encode())
+    t0 = time.time()
+    while time.time() - t0 < 3.0:
+        ln = ser.readline().decode(errors='replace').strip()
+        if ln.startswith('WIN'):
+            return ln
+    return None
+
+
 def board_warmup(ser, timeout=40.0):
     """预热: 空测一次并丢弃。
 
@@ -386,6 +405,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--visa', help='2636B 资源串, 如 TCPIP0::169.254.0.1::5025::SOCKET')
     ap.add_argument('--port', help='装置串口 (默认自动找 CH340)')
+    ap.add_argument('--win-ms', type=float, default=0.0,
+                    help='对 |设定| <= --win-below-pa 的点, 下发 T<ms> 强制窗口长度; '
+                         '0 = 全部用固件自动 (1s / <1nA 换 10s)')
+    ap.add_argument('--win-below-pa', type=float, default=20.0,
+                    help='--win-ms 适用的电流上限 (pA)。默认 20 -> 1~20 pA 用长窗口')
     ap.add_argument('--points', default=None,
                     help='逗号分隔的设定值, 单位 nA。默认 +45 递减到 -45 步长 5')
     ap.add_argument('--n', type=int, default=3, help='每点测量次数 (需求①=3)')
@@ -424,6 +448,17 @@ def main():
             print("── 设定 %+.4f nA " % i_nA + "─" * 46)
             rng = smu_set(smu, i_nA * 1e-9)
             print("   档位 %.4g A" % rng)
+
+            # ---- 窗口长度: 低电流点按需强制 ----
+            # |设定| <= win_below_pa 的点用 --win-ms 指定的窗口, 其余交回固件自动。
+            # 超时必须跟着窗口走 —— 50s 窗口配 40s 超时会必然超时。
+            if a.win_ms > 0 and abs(i_nA) * 1000.0 <= a.win_below_pa:
+                win_ms = a.win_ms
+            else:
+                win_ms = 0.0
+            echo = board_set_window(ser, win_ms)
+            m_timeout = (win_ms / 1000.0) + 30.0 if win_ms else 40.0
+            print("   窗口: %s" % (echo or ("自动" if not win_ms else "** 无回显 **")))
             smu_write(smu, 'smua.source.output = smua.OUTPUT_ON')
             time.sleep(a.settle)
 
@@ -432,7 +467,7 @@ def main():
             # 空闲期积分器被输入电流推到轨上, 第一次的拉回相行程最长, 首拍最
             # 容易读到坏值(INT1 落在轨码)。后面几次都从上一窗末端起步(在阈值
             # 之间), 行程短就不会。空跑一次把它消耗掉。
-            print("   ", board_warmup(ser))
+            print("   ", board_warmup(ser, m_timeout))
 
             dev_vals, rb_all = [], []
             tries = 0
@@ -442,7 +477,7 @@ def main():
                 smp = ReadbackSampler(smu)
                 smp.start()
                 try:
-                    d = board_measure(ser)
+                    d = board_measure(ser, m_timeout)
                 finally:
                     picked = smp.stop(READBACK_N)   # 无论如何都要把线程停干净
 

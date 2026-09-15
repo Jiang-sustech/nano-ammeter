@@ -30,6 +30,17 @@ static uint8_t result_is_longw;             /* 结果是否来自 10s 长窗口 
 static uint8_t result_is_timeout;
 static uint8_t long_tried;                  /* 本次测量已经换过 10s 窗口 */
 static uint32_t precond_to_at_start;        /* 本次测量开始时的 precond_timeout 快照 */
+static uint32_t forced_window_ticks;        /* 0 = 自动; 否则每次 S 都用这个窗口长度 */
+
+void MeasurementState_SetForcedWindowTicks(uint32_t ticks)
+{
+    forced_window_ticks = ticks;
+}
+
+uint32_t MeasurementState_GetForcedWindowTicks(void)
+{
+    return forced_window_ticks;
+}
 
 void MeasurementState_Init(void)
 {
@@ -50,10 +61,14 @@ void MeasurementState_StartCommand(void)
     }
 
     /* 每次测量都从短窗口起步 —— 由它决定要不要换长的。
-     * 必须在 Current_Start() 之前设: Start 按窗口长度算抽点间隔。 */
-    long_tried = 0U;
+     * 必须在 Current_Start() 之前设: Start 按窗口长度算抽点间隔。
+     *
+     * 但**强制窗口优先**: 上位机设过就用它, 且 long_tried 直接置 1 让
+     * 后面那段自动切换不生效 (否则 <1nA 时会把 50s 窗口换成 10s)。 */
+    long_tried = (forced_window_ticks != 0U) ? 1U : 0U;
     precond_to_at_start = precond_timeout;   /* 快照, 用于事后判断本次有没有超时 */
-    Current_SetWindowTicks(CURRENT_WIN_SHORT_TICKS);
+    Current_SetWindowTicks((forced_window_ticks != 0U) ? forced_window_ticks
+                                                       : CURRENT_WIN_SHORT_TICKS);
 
     Current_Start();
     if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
@@ -132,7 +147,9 @@ MeasurementProcessResult MeasurementState_Process(void)
         /* 出结果 */
         measurement_result = current;
         measurement_result_ext = current_ext;
-        result_is_longw = long_tried;
+        /* MODE 由**实际窗口长度**决定, 不用 long_tried —— 后者在强制窗口时被
+         * 提前置 1, 会把强制 1s 也报成 MODE=2。真正的窗口长度看结果行的 T=。 */
+        result_is_longw = (measurement_ticks > CURRENT_WIN_SHORT_TICKS) ? 1U : 0U;
         /* 拉回相守卫超时 -> 开窗那一拍可能还没到位, 读数不可信, **必须上报**。
          * 判据是"本次测量期间 precond_timeout 有没有涨" —— 不能用它的绝对值,
          * 那是个跨测量只增的累计计数, 看过一次之后就永远非 0。

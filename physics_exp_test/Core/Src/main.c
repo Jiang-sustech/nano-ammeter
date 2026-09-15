@@ -343,7 +343,12 @@ int main(void)
        *   K<段>,<a_ppm>,<b_fA> 写入分段系数        Z 清除分段系数
        *   Q                    查询物理常数 q/I+/I-
        *   Q<q_aC>,<i+_pA>,<i-_pA>  写入物理常数
-       *   T<秒>                本次窗口的实际时长 (1s, 或 <1nA 时换的 10s) */
+       *   T<ms>                强制窗口长度 (毫秒); T0 = 回到自动 (1s/<1nA 换 10s)
+       *
+       * 注意 T 的一进一出, 别混:
+       *   T<ms>  (指令, 发进来)  = 设定窗口长度
+       *   T=<ms> (结果行, 发出去) = 本次窗口的**实际**时长
+       * 两者不是一回事 —— 后者是事实, 前者是要求。结果行里的才是准的。 */
       /* 物理常数与分段系数分成两组指令: 前者是仪器的实测属性, 后者是拟合出来的
        * 修正; 混在一起会让人以为 Z 会把标定好的 q 一起清掉 */
       /* 整行接收: 参数化指令 (K/C/Z) 需要整行; 单字符指令走同一个缓冲,
@@ -362,6 +367,35 @@ int main(void)
           /* 裸 Q = 查询, 带参数 = 写入 */
           if (line[1] == '\0') { Cal_ReportPhys(); }
           else                 { Cal_HandlePhysLine(line); }
+          cmd = 0x00;
+        }
+        else if (cmd == 'T')
+        {
+          /* T<ms>: **强制窗口长度** (毫秒); T0 = 回到自动 (1s, <1nA 时换 10s)。
+           * 1 拍 = 160us -> ticks = ms*1000/160 = ms*25/4。
+           * 用途: 1~20 pA 那一段 10s 窗口信噪比不够, 要 50s (T50000)。
+           * 按幅值自动切换做不到 —— 20 pA 与 50 pA 都 <1nA, 区分不开。 */
+          uint32_t ms = 0U;
+          char wbuf[48];
+          const char *p = &line[1];
+          while ((*p >= '0') && (*p <= '9'))
+          {
+            ms = ms * 10U + (uint32_t)(*p - '0');
+            p++;
+          }
+          if (ms == 0U)
+          {
+            MeasurementState_SetForcedWindowTicks(0U);
+            UART_SendString("WIN AUTO\r\n");
+          }
+          else
+          {
+            MeasurementState_SetForcedWindowTicks((ms * 25U) / 4U);
+            sprintf(wbuf, "WIN %lums (%lu ticks)\r\n",
+                    (unsigned long)ms,
+                    (unsigned long)MeasurementState_GetForcedWindowTicks());
+            UART_SendString(wbuf);
+          }
           cmd = 0x00;
         }
         else if (cmd == 'M')
