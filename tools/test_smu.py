@@ -41,7 +41,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cal_sweep import smu_open, smu_set, smu_off
+from cal_sweep import smu_open, smu_set, smu_off, smu_write, smu_check_errors
 from sweep_pulse import build_pulse_tsp
 
 # 直流阶梯 (nA)。取的是标定用的那组, 正负兼备
@@ -173,7 +173,7 @@ def main():
         # ---------------- 1 短接自检 ----------------
         # 用最大的一个点量 —— 电流越大, 短接电阻上的压降越好测
         i_chk = 45e-9
-        smu.write('smua.source.output = smu.OUTPUT_ON')
+        smu_write(smu, 'smua.source.output = smua.OUTPUT_ON')
         smu_set(smu, i_chk)
         time.sleep(a.settle)
         v_chk = read_v(smu)
@@ -199,7 +199,7 @@ def main():
               % ("设定", "回读均值", "回读 sigma", "偏差", "档位", "输出电压"))
         for na in all_na:
             i_set = na * 1e-9
-            smu.write('smua.source.output = smu.OUTPUT_ON')
+            smu_write(smu, 'smua.source.output = smua.OUTPUT_ON')
             rng = smu_set(smu, i_set)
             time.sleep(a.settle)
             vals, _ = read_i_n(smu, a.n, a.dt)
@@ -217,7 +217,7 @@ def main():
 
         # ---------------- 3 噪声与漂移 ----------------
         print("── 3 噪声与漂移 (固定 10 nA, 连采 10 s) ──")
-        smu.write('smua.source.output = smu.OUTPUT_ON')
+        smu_write(smu, 'smua.source.output = smua.OUTPUT_ON')
         smu_set(smu, 10e-9)
         time.sleep(a.settle)
         n_long = max(20, int(10.0 / max(a.dt, 0.05)))
@@ -244,9 +244,9 @@ def main():
             print("   即将下发:")
             print("     ", cmd)
             try:
-                smu.write('smua.source.output = smu.OUTPUT_ON')
+                smu_write(smu, 'smua.source.output = smua.OUTPUT_ON')
                 smu_set(smu, i_pk)
-                smu.write(cmd)
+                smu_write(smu, cmd)
                 print("   配置**成功**, 仪器回读:")
                 for tsp in ('smua.trigger.source.pulsewidth',
                             'smua.trigger.source.pulserange',
@@ -267,7 +267,7 @@ def main():
                 print("   -> 手册里确认 ConfigPulseIMeasureVSweepLin 的参数顺序")
             finally:
                 try:
-                    smu.write('smua.abort()')
+                    smu_write(smu, 'smua.abort()')
                 except Exception:
                     pass
                 smu_off(smu)

@@ -66,23 +66,54 @@ def open_smu(res):
 
 def smu_setup(smu):
     """直流电流源模式。**只在开始时调用一次。**"""
-    smu.write('smua.reset()')
-    smu.write('smua.source.func = smua.OUTPUT_DCAMPS')
-    smu.write('smua.source.autorangei = smua.AUTORANGE_ON')
-    smu.write('smua.source.limitv = 20')          # 顺从电压, 我们输入是虚地, 20V 足够
-    smu.write('smua.source.output = smua.OUTPUT_OFF')
+    smu_write(smu, 'smua.reset()')
+    smu_write(smu, 'smua.source.func = smua.OUTPUT_DCAMPS')
+    smu_write(smu, 'smua.source.autorangei = smua.AUTORANGE_ON')
+    smu_write(smu, 'smua.source.limitv = 20')          # 顺从电压, 我们输入是虚地, 20V 足够
+    smu_write(smu, 'smua.source.output = smua.OUTPUT_OFF')
 
 
 def smu_set(smu, i_amp):
-    smu.write('smua.source.leveli = %.9e' % i_amp)
+    smu_write(smu, 'smua.source.leveli = %.9e' % i_amp)
 
 
 def smu_on(smu):
-    smu.write('smua.source.output = smua.OUTPUT_ON')
+    smu_write(smu, 'smua.source.output = smua.OUTPUT_ON')
 
 
 def smu_off(smu):
-    smu.write('smua.source.output = smu.OUTPUT_OFF')
+    smu_write(smu, 'smua.source.output = smua.OUTPUT_OFF')
+
+
+
+def smu_check_errors(smu, ctx=""):
+    """把错误队列读空并抛异常。
+
+    2026-09-15 实测踩到: TSP 的 `smu.OUTPUT_ON` (smu 是 nil, 正确写法是
+    `smua.`) 会抛 -286 "attempt to index global `smu` (a nil value)", 但
+    **pyvisa 的 write 不检查错误队列** —— 异常进仪器队列, 脚本毫无感觉一路
+    跑完, 读数全是"输出根本没开"时的本底, 看起来像正常数据。
+    """
+    try:
+        n = int(float(smu.query('print(errorqueue.count)')))
+    except Exception as e:
+        raise RuntimeError("查错误队列就失败了 (%s): %s" % (ctx, e))
+    if n == 0:
+        return
+    msgs = []
+    for _ in range(n):
+        try:
+            msgs.append(smu.query('print(errorqueue.next())').strip())
+        except Exception:
+            break
+    raise RuntimeError("源表报错 %d 条%s" % (len(msgs), (" (%s)" % ctx) if ctx else "")
+                       + ":\n    " + "\n    ".join(msgs))
+
+
+def smu_write(smu, tsp, ctx=""):
+    """写 TSP + 立刻查错误队列。所有写操作都用它, 不要直接 smu.write。"""
+    smu.write(tsp)          # 必须裸 write, 不能再套 smu_write (无限递归)
+    smu_check_errors(smu, ctx or tsp.strip()[:60])
 
 
 def smu_read(smu):

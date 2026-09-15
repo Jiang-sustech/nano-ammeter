@@ -105,7 +105,7 @@ def smu_open(res):
     smu.write_termination = '\n'
     smu.timeout = 5000
     print("    型号:", smu.query('print(localnode.model)').strip())
-    smu.write('smua.reset()')
+    smu_write(smu, 'smua.reset()')
     # ---- 安全关断状态 (推导与出厂值对比见 docs/2636B源表接入.md 第三节) ----
     # `reset()` 会把 offlimitv 打回**出厂 40 V**, 而出厂 offmode = OUTPUT_NORMAL
     # 意味着"关输出"之后线上仍挂着一台 0 A 电流源, 其限压 40 V —— 对
@@ -114,15 +114,15 @@ def smu_open(res):
     # 改成 0 A 电流源 + 限压 2 V。**不用 OUTPUT_HIGH_Z**: 手册明确警告它会磨损
     # 输出继电器, 扫描时频繁开关不可取。
     # 注意顺序: reset() 之后才能设, 否则会被 reset 冲掉。
-    smu.write('smua.source.offmode   = smua.OUTPUT_NORMAL')
-    smu.write('smua.source.offfunc   = smua.OUTPUT_DCAMPS')
-    smu.write('smua.source.offlimitv = 2')
-    smu.write('smua.source.func = smua.OUTPUT_DCAMPS')
+    smu_write(smu, 'smua.source.offmode   = smua.OUTPUT_NORMAL')
+    smu_write(smu, 'smua.source.offfunc   = smua.OUTPUT_DCAMPS')
+    smu_write(smu, 'smua.source.offlimitv = 2')
+    smu_write(smu, 'smua.source.func = smua.OUTPUT_DCAMPS')
     # **用 autorange** —— 官方默认 (四个功能各自独立、默认全开), 它会挑能覆盖
     # 设定值的最小档, 那正是我们想要的。唯一要额外做的是**把实际用的档位查出来
     # 记录** (见 smu_set: 回读固定项 240 fA/3 pA/40 pA 随档位变, 进预算要用)。
-    smu.write('smua.source.autorangei = smua.AUTORANGE_ON')
-    smu.write('smua.measure.autorangei = smua.AUTORANGE_ON')
+    smu_write(smu, 'smua.source.autorangei = smua.AUTORANGE_ON')
+    smu_write(smu, 'smua.measure.autorangei = smua.AUTORANGE_ON')
     # 顺从电压。2026-09-15 由 20V 调低到 5V。
     #
     # 判据**不是**"够不够用", 而是"**让输入级的钳位二极管永远不导通**"。
@@ -149,8 +149,8 @@ def smu_open(res):
     #      (→45nA 需 11V) 还是固定偏置(→永远 ~0.5V), 推算分不出来。
     #      **这一条决定了 5V 能不能压到 4.5V。**
     #      验证: 设 +45 nA 读 smua.measure.v()。接近 5V 就要调回去并查输入级。
-    smu.write('smua.source.limitv = 5')
-    smu.write('smua.source.output = smu.OUTPUT_OFF')
+    smu_write(smu, 'smua.source.limitv = 5')
+    smu_write(smu, 'smua.source.output = smua.OUTPUT_OFF')
     return smu
 
 
@@ -177,10 +177,10 @@ def smu_set(smu, i_amp, force_range=None):
     r = force_range if force_range is not None else best_range(i_amp)
     if r is None:
         raise ValueError("设定值 %.4g A 超出 2636B 最大档 3 A" % i_amp)
-    smu.write('smua.source.leveli = %.9e' % i_amp)
+    smu_write(smu, 'smua.source.leveli = %.9e' % i_amp)
     if force_range is not None:
-        smu.write('smua.source.autorangei = smua.AUTORANGE_OFF')
-        smu.write('smua.source.rangei = %.9e' % force_range)
+        smu_write(smu, 'smua.source.autorangei = smua.AUTORANGE_OFF')
+        smu_write(smu, 'smua.source.rangei = %.9e' % force_range)
     # 查实际档位 (autorange 选出来的, 或上面强制设的)
     try:
         actual = float(smu.query('print(smua.source.rangei)'))
@@ -189,9 +189,48 @@ def smu_set(smu, i_amp, force_range=None):
     return actual
 
 
+def smu_check_errors(smu, ctx=""):
+    """把错误队列**读空并抛异常**。
+
+    为什么必须有这个 —— 2026-09-15 实测踩到的坑:
+      TSP 的 `smua.OUTPUT_ON` (这里 `smu` 是 nil, 正确的是 `smua.`) 会抛
+      "attempt to index global `smu` (a nil value)" (-286), 但 **pyvisa 的 write
+      不检查错误队列** —— 异常进了仪器的队列, 脚本这边毫无感觉, 一路跑完。
+      后果: 35 条错误静静躺着, 而所有读数都是"输出根本没开"时的本底,
+      看起来像正常数据。**这类静默失效比报错危险得多。**
+
+    任何**写操作**之后都该过一遍。读操作(query)出错一般会当场抛, 风险小些。
+    """
+    try:
+        n = int(float(smu.query('print(errorqueue.count)')))
+    except Exception as e:
+        raise RuntimeError("查错误队列就失败了 (%s): %s" % (ctx, e))
+    if n == 0:
+        return
+    msgs = []
+    for _ in range(n):
+        try:
+            msgs.append(smu.query('print(errorqueue.next())').strip())
+        except Exception:
+            break
+    raise RuntimeError("源表报错 %d 条%s:\n    %s"
+                       % (len(msgs), (" (%s)" % ctx) if ctx else "",
+                          "\n    ".join(msgs)))
+
+
+def smu_write(smu, tsp, ctx=""):
+    """写 TSP + 立刻查错误队列。**所有写操作都用它, 不要直接 smu.write。**
+
+    代价是每次写多一次查询往返 —— 本工程的写操作都是每点一次, 不在热路径上,
+    这点开销换"错误不再静默"完全值得。
+    """
+    smu.write(tsp)          # 这里必须用裸 write, 不能再套 smu_write (无限递归)
+    smu_check_errors(smu, ctx or tsp.strip()[:60])
+
+
 def smu_off(smu):
     try:
-        smu.write('smua.source.output = smu.OUTPUT_OFF')
+        smu_write(smu, 'smua.source.output = smua.OUTPUT_OFF')
     except Exception:
         pass
 
@@ -337,7 +376,7 @@ def main():
             print("── 设定 %+.4f nA " % i_nA + "─" * 46)
             rng = smu_set(smu, i_nA * 1e-9)
             print("   档位 %.4g A" % rng)
-            smu.write('smua.source.output = smu.OUTPUT_ON')
+            smu_write(smu, 'smua.source.output = smua.OUTPUT_ON')
             time.sleep(a.settle)
 
             # ---- 预热: 空跑一次并丢弃 ----

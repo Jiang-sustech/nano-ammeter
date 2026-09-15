@@ -39,7 +39,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cal_sweep import (smu_open, smu_off, board_open, board_measure,
+from cal_sweep import (smu_open, smu_off, smu_write, smu_check_errors,
+                        board_open, board_measure,
                         ReadbackSampler, board_warmup, smu_set)
 
 
@@ -92,7 +93,7 @@ def main():
         for pA in pts_pA:
             rng = smu_set(smu, pA * 1e-12)
             _rng = "%.3g A" % rng
-            smu.write('smua.source.output = smu.OUTPUT_ON')
+            smu_write(smu, 'smua.source.output = smua.OUTPUT_ON')
             import time as _t
             _t.sleep(a.settle)
 

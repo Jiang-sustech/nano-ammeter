@@ -31,7 +31,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cal_sweep import (smu_open, smu_off, board_open, board_measure,
+from cal_sweep import (smu_open, smu_off, smu_write, smu_check_errors,
+                        board_open, board_measure,
                         ReadbackSampler, board_warmup, smu_set)
 
 # ===========================================================================
@@ -175,8 +176,8 @@ def build_pulse_tsp(i_peak, ton, toff, n_pulse):
 def pulse_start(smu, i_peak, ton, toff, n_pulse):
     prng = smu_set(smu, i_peak)    # 档位要覆盖**峰值** (1uA 峰值 -> 10uA 档)
     print("      脉冲段 峰值 %.4g nA -> 档位 %.4g A" % (i_peak * 1e9, prng))
-    smu.write(build_pulse_tsp(i_peak, ton, toff, n_pulse))
-    smu.write('InitiatePulseTest(1)')
+    smu_write(smu, build_pulse_tsp(i_peak, ton, toff, n_pulse))
+    smu_write(smu, 'InitiatePulseTest(1)')
     return prng
 
 
@@ -186,9 +187,9 @@ def pc_chop_start(smu, ton, toff, stop_flag):
 
     def loop():
         while not stop_flag['stop']:
-            smu.write('smua.source.output = smu.OUTPUT_ON')
+            smu_write(smu, 'smua.source.output = smua.OUTPUT_ON')
             time.sleep(ton)
-            smu.write('smua.source.output = smu.OUTPUT_OFF')
+            smu_write(smu, 'smua.source.output = smua.OUTPUT_OFF')
             time.sleep(toff)
 
     t = threading.Thread(target=loop, daemon=True)
@@ -225,11 +226,11 @@ def run_point(ser, smu, p, kind, n, stop_flag, rows, pc_chop=False):
                   % (ton * 1e3, toff * 1e3))
             time.sleep(1.0)
         else:
-            smu.write('smua.source.output = smu.OUTPUT_ON')
+            smu_write(smu, 'smua.source.output = smua.OUTPUT_ON')
             pulse_start(smu, p['peak'] * 1e-9, ton, toff, 100000)
             time.sleep(0.3)
     else:
-        smu.write('smua.source.output = smu.OUTPUT_ON')
+        smu_write(smu, 'smua.source.output = smua.OUTPUT_ON')
         rng = smu_set(smu, p['avg'] * 1e-9)
         print("      直流段 %.4g nA -> 档位 %.4g A" % (p['avg'], rng))
         time.sleep(2.0)
@@ -259,7 +260,7 @@ def run_point(ser, smu, p, kind, n, stop_flag, rows, pc_chop=False):
         time.sleep(0.3)
     # 脉冲串停掉, 再设直流 —— 否则脉冲还在跑, 直流设不进去
     try:
-        smu.write('smua.abort()')
+        smu_write(smu, 'smua.abort()')
     except Exception:
         pass
     time.sleep(0.2)
@@ -325,8 +326,8 @@ def main():
         print("   ", cmd)
         try:
             smu_set(smu, p['peak'] * 1e-9)
-            smu.write('smua.source.output = smu.OUTPUT_ON')
-            smu.write(cmd)
+            smu_write(smu, 'smua.source.output = smua.OUTPUT_ON')
+            smu_write(smu, cmd)
             print("配置成功。仪器回读:")
             for q in ('print(smua.trigger.source.pulsewidth)',
                       'print(smua.source.leveli)',
