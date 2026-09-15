@@ -106,6 +106,17 @@ def smu_open(res):
     smu.timeout = 5000
     print("    型号:", smu.query('print(localnode.model)').strip())
     smu.write('smua.reset()')
+    # ---- 安全关断状态 (推导与出厂值对比见 docs/2636B源表接入.md 第三节) ----
+    # `reset()` 会把 offlimitv 打回**出厂 40 V**, 而出厂 offmode = OUTPUT_NORMAL
+    # 意味着"关输出"之后线上仍挂着一台 0 A 电流源, 其限压 40 V —— 对
+    # ADA4530-1 这类高阻输入级是危险的。而本工程的每个点之间、每次换档都会
+    # 关一次输出, 所以这不是理论风险。
+    # 改成 0 A 电流源 + 限压 2 V。**不用 OUTPUT_HIGH_Z**: 手册明确警告它会磨损
+    # 输出继电器, 扫描时频繁开关不可取。
+    # 注意顺序: reset() 之后才能设, 否则会被 reset 冲掉。
+    smu.write('smua.source.offmode   = smua.OUTPUT_NORMAL')
+    smu.write('smua.source.offfunc   = smua.OUTPUT_DCAMPS')
+    smu.write('smua.source.offlimitv = 2')
     smu.write('smua.source.func = smua.OUTPUT_DCAMPS')
     # **用 autorange** —— 官方默认 (四个功能各自独立、默认全开), 它会挑能覆盖
     # 设定值的最小档, 那正是我们想要的。唯一要额外做的是**把实际用的档位查出来
