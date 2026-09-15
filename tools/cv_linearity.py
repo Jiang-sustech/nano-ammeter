@@ -32,7 +32,9 @@
 偏差多大。这正是"装置的线性度"该有的定义。
 """
 import argparse
+import collections
 import csv
+import glob
 import math
 import os
 import sys
@@ -54,6 +56,41 @@ def load(path):
             a2 = m / nt
             pts.setdefault(round(I * 1e9, 4), []).append((a1, a2, I))
     return pts
+
+
+def pred_from(c1, c2, m, n, x):
+    """式(6)。x = [M, b0, b2] (安培制)"""
+    nt = m + n
+    a1 = VREF * (c2 - c1) / 65536.0 / (nt * T_INT)
+    return x[0] * a1 + x[1] + x[2] * (m / nt)
+
+
+def eval_npz(pattern, x, max_bad=3):
+    """拿**旧的实测 npz** 做独立验证。
+
+    比 --loo 更硬: 旧 npz 来自**另一个会话、另一版固件、源表手动设的**,
+    与拟合所用的那批数据在时间和流程上都完全独立。
+    排除 result_mode != 1 (M0/M3 手动模式) 和坏读多的文件。
+    """
+    import numpy as np
+    by = collections.defaultdict(list)
+    used = skipped = 0
+    for f in sorted(glob.glob(pattern)):
+        d = np.load(f, allow_pickle=True)
+        t_nA = float(d['true_na'])
+        if not math.isfinite(t_nA):
+            skipped += 1; continue
+        if int(d['result_mode']) != 1:
+            skipped += 1; continue
+        m, n = int(d['raw_m']), int(d['raw_n'])
+        c1, c2 = int(d['raw_ext1']), int(d['raw_ext2'])
+        if min(m, n) < 0 or c1 < 0:
+            skipped += 1; continue
+        if (d['wave_ext'] >= 65535).sum() > max_bad:
+            skipped += 1; continue
+        by[round(t_nA, 3)].append((pred_from(c1, c2, m, n, x) - t_nA * 1e-9) * 1e12)
+        used += 1
+    return by, used, skipped
 
 
 def lstsq(A, y):
@@ -118,6 +155,10 @@ def main():
                          "或直接给标定点的逗号分隔列表 (nA)")
     ap.add_argument('--fs-na', type=float, default=90.0, help='全量程 (nA), 用于算 %%FS')
     ap.add_argument('--loo', action='store_true', help='再做一次留一交叉验证')
+    ap.add_argument('--npz', default=None,
+                    help='用旧的实测 npz (glob) 做**跨会话**独立验证, 例如 '
+                         "data/raw_09_13_*.npz 。比 --loo 更硬 —— "
+                         "那批数据来自另一版固件、另一个会话。")
     a = ap.parse_args()
 
     if not os.path.exists(a.fit):
@@ -231,6 +272,38 @@ def main():
         if r:
             print("      max|残差|/FS = %.5f %%   (FS = %g nA)"
                   % (r[1] / (a.fs_na * 1e-9) * 100, a.fs_na))
+
+    # ---------------- 跨会话独立验证 (--npz) ----------------
+    if a.npz:
+        print("")
+        print("--- 跨会话独立验证: %s ---" % a.npz)
+        # 用**全部**数据拟合常数 (这是实际会烧进固件的那组)
+        xall = fit([r for k in keys for r in pts[k]])
+        q, i_pos, i_neg = consts(xall)
+        print("  常数来自: %s 的全部 %d 点 (q=%.6e)" % (a.fit, len(keys), q))
+        by, used, skipped = eval_npz(a.npz, xall)
+        print("  用到 %d 个文件, 跳过 %d 个 (非 MODE=1 / 缺字段 / 坏读多)" % (used, skipped))
+        if used == 0:
+            print("  ** glob 没匹配到可用文件 —— 检查路径。"
+                  "注意 cal_sweep.py 只写 CSV 不写 npz。**")
+            return
+        print("%12s %6s %16s %14s" % ("真值(nA)", "n", "残差均值(pA)", "相对(%)"))
+        allr = []
+        for k in sorted(by):
+            v = by[k]; mu = sum(v) / len(v); allr += v
+            print("%12.3f %6d %16.3f %14.4f" % (k, len(v), mu, mu / (k * 1e3) * 100))
+        # 注意: allr 里的数**已经是 pA**, 不要再走 report() (它按安培换算)
+        print("      样本外(跨会话): n=%d  RMS %.3f pA  max|.| %.3f pA"
+              % (len(allr), math.sqrt(sum(e * e for e in allr) / len(allr)),
+                 max(abs(e) for e in allr)))
+        pos = [e for k in by if k > 0 for e in by[k]]
+        neg = [e for k in by if k < 0 for e in by[k]]
+        if pos and neg:
+            print("      正电流 %+.3f pA (n=%d)   负电流 %+.3f pA (n=%d)"
+                  % (sum(pos) / len(pos), len(pos), sum(neg) / len(neg), len(neg)))
+            print("      -> 两者不等 = 极性相关偏置; 解出 偏置 %.3f pA, 增益项 %.5f pA/nA"
+                  % ((sum(pos) / len(pos) + sum(neg) / len(neg)) / 2,
+                     (sum(pos) / len(pos) - sum(neg) / len(neg)) / (2 * 25.0)))
 
     print("")
     print("=" * 78)
