@@ -62,10 +62,27 @@ static uint32_t ext_bad_read;               /* 坏读累计 (跨窗口只增不�
  * **这个判据只影响 ERR 这个诊断计数, 永远不影响测量数值。** */
 #define RAIL_DETECT_CODE  0xF000U       /* 内置压轨判据 (满轨实测 0xFFF0) */
 
-/* 阻塞 n 微秒 (DWT 忙等, 80MHz)。中断里不能用 HAL_Delay (SysTick 被饿死) */
+/* 阻塞 n 微秒 (DWT 忙等, 80MHz)。中断里不能用 HAL_Delay (SysTick 被饿死)
+ *
+ * ⚠️ 这里的自启用是**兜底**, 不是主路径 —— 主路径在 main() 里显式启用 (见那里
+ * 的长注释)。之所以必须兜底: 本函数**不能假设 DWT 已经开着**。2026-09-15 实测
+ * 踩到过 —— 它裸读 DWT->CYCCNT 而启用代码在别处、顺序上排它后面, 结果 CYCCNT
+ * 恒为 0, `(0-0) < us*80` 永真, **死循环在 TIM6 中断里**, 整机不响应。
+ * 判据必须是"CYCCNTENA 真的为 1", 而不是"我相信有人已经开好了"。 */
 static void DelayUs(uint32_t us)
 {
-    uint32_t t0 = DWT->CYCCNT;
+    uint32_t t0;
+
+    if ((CoreDebug->DEMCR & CoreDebug_DEMCR_TRCENA_Msk) == 0U)
+    {
+        CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    }
+    if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0U)
+    {
+        DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    }
+
+    t0 = DWT->CYCCNT;
     while ((DWT->CYCCNT - t0) < (us * 80U)) { }
 }
 

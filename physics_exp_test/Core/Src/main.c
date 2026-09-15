@@ -273,6 +273,22 @@ int main(void)
   MX_USART1_UART_Init();
   MX_SPI2_Init();
   /* USER CODE BEGIN 2 */
+  /* ---- DWT 周期计数器: 必须在这里启用 ----
+   * 中断里的微秒级忙等 (`DelayUs` / `DWT_DelayUs`) 全靠它。**不能依赖
+   * "第一个调用者顺手打开"** —— 2026-09-15 实测踩到:
+   *   current.c 的 DelayUs() **裸读** DWT->CYCCNT, 而启用 DWT 的那 4 行在
+   *   ads8866.c 的 DWT_DelayUs() 里, 调用顺序上排在 DelayUs **之后**
+   *   (USE_INTERNAL_ADC=0 时 ReadBoth 先 DelayUs(EXT_PREDELAY_US) 再读外部)。
+   *   -> CYCCNTENA 一直是 0 -> DWT->CYCCNT 恒为 0 -> (0-0)<640 永真
+   *   -> **死循环在 TIM6 中断里**, 主循环与串口全停, 连 E 都不应答。
+   *   SWD 实测: pc 停在 DelayUs (current.c:69), 状态 Handler External
+   *   Interrupt(54)=TIM6; DWT_CTRL=0x40000000 (bit0=0), CYCCNT 连读两次皆 0。
+   * 另外: TRCENA 之前是**调试器 attach 时顺手置上的**, 断开调试器就没了 ——
+   *       这种"靠调试器帮忙"的隐式依赖必须去掉。 */
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
   ADG_Disable();                 /* 空闲: 关断参考电流 (安全最高优先级) */
   SH1106_Init();
   Adc_Init();                    /* 控制通路: 内置 ADC1 (PA3) 校准 + 使能 */
