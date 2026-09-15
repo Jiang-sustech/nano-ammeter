@@ -110,13 +110,46 @@ def best_range(i_amp):
     return None
 
 
+def smu_drain(smu, quiet_ms=300, max_read=64):
+    """把仪器**输出队列里残留的应答**读掉并丢弃。
+
+    为什么必须有 —— 2026-09-15 实测踩到:
+      上一个进程被强杀 (或上一次会话没读干净), 仪器输出队列里会留一条应答。
+      之后每次 query 都**错位一格**: 读"型号"拿到上一条的应答, 读"错误队列"
+      拿到"2636B", 于是 int(float(...)) 炸在莫名其妙的地方。
+      症状很有迷惑性 —— 看起来像"型号读出来是 0.00000e+00"。
+
+    做法: 用短超时反复读, 读到超时为止。读完恢复原超时。
+    """
+    old = smu.timeout
+    smu.timeout = int(quiet_ms)
+    junk = 0
+    try:
+        for _ in range(max_read):
+            try:
+                smu.read_raw()
+                junk += 1
+            except Exception:
+                break                      # 超时 = 队列空了
+    finally:
+        smu.timeout = old
+    return junk
+
+
 def smu_open(res):
     rm = pyvisa.ResourceManager('@py')      # 纯 Python 后端, 不需要 NI-VISA
     smu = rm.open_resource(res)
     smu.read_termination = '\n'
     smu.write_termination = '\n'
     smu.timeout = 5000
-    print("    型号:", smu.query('print(localnode.model)').strip())
+    # 先把残留应答读掉, 否则下面每条 query 都错位一格 (见 smu_drain)
+    n_junk = smu_drain(smu)
+    if n_junk:
+        print("    (清掉 %d 条残留应答 —— 上一次连接没读干净)" % n_junk)
+    model = smu.query('print(localnode.model)').strip()
+    print("    型号:", model)
+    if "2636" not in model and "2600" not in model:
+        raise RuntimeError("型号读出来是 %r, 不像 2636B —— 应答可能还在错位" % model)
     smu_write(smu, 'smua.reset()')
     # ---- 安全关断状态 (推导与出厂值对比见 docs/2636B源表接入.md 第三节) ----
     # `reset()` 会把 offlimitv 打回**出厂 40 V**, 而出厂 offmode = OUTPUT_NORMAL
