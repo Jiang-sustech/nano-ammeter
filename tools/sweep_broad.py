@@ -115,10 +115,20 @@ def main():
                 if d.get('timeout'):
                     print("      (丢弃一次 TIMEOUT)"); continue
                 dev.append(float(d['i']))
+                # **端点码必须存** —— 2026-09-15 发现原来没存, 后果是这份数据
+                # 只能做 2 参数的线性修正 (读数 = a*真值 + b), **套不了式(6)**,
+                # 于是"验证点 vs 重合点"只能用 8 pA 的粗模型回答, 而式(6) 本身
+                # 在标定数据上是 1.4 pA。缺的就是这几列。
                 rows.append(dict(set_pA=pA, rep=len(dev), mode=int(d['mode']),
                                  t_ms=int(d['t']) if d['t'] else 0,
                                  dev_nA=float(d['i']),
-                                 dev_ext_nA=float(d['x']) if d['x'] else float('nan')))
+                                 dev_ext_nA=float(d['x']) if d['x'] else float('nan'),
+                                 m=int(d['m']) if d.get('m') else -1,
+                                 n=int(d['n']) if d.get('n') else -1,
+                                 int1=int(d['int1']) if d.get('int1') else -1,
+                                 int2=int(d['int2']) if d.get('int2') else -1,
+                                 ext1=int(d['ext1']) if d.get('ext1') else -1,
+                                 ext2=int(d['ext2']) if d.get('ext2') else -1))
 
             if not dev or not rb:
                 print("  %-9.4g pA   ** 无有效数据 **" % pA); continue
