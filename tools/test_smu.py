@@ -168,6 +168,9 @@ def main():
                 print("   %-6s: ** %s" % (label, e))
         print("   limitv   : %.4g V" % q(smu, 'smua.source.limitv'))
         print("   offlimitv: %.4g V" % q(smu, 'smua.source.offlimitv'))
+        print("   NPLC     : %.4g   (积分周波数, 实测上限 25)"
+              % q(smu, 'smua.measure.nplc'))
+        print("   autozero : %.4g   (0=OFF 1=ONCE 2=ON)" % q(smu, 'smua.measure.autozero'))
         print("")
 
         # ---------------- 1 短接自检 ----------------
@@ -179,12 +182,17 @@ def main():
         v_chk = read_v(smu)
         r_chk = v_chk / i_chk if i_chk else float('nan')
         print("── 1 短接自检 (源 %.4g nA) ──" % (i_chk * 1e9))
-        print("   输出电压 V = %+.6f V   ->  短接电阻 R = %.4g ohm"
-              % (v_chk, r_chk))
+        print("   输出电压 V = %+.6f V   (等效 R = V/I = %.4g ohm)" % (v_chk, r_chk))
         if not math.isfinite(v_chk):
             print("   ** 读不到电压 —— 检查连接 **")
         elif abs(v_chk) < 1.0:
             print("   -> 短接/虚地确认 (V 远低于 limitv) —— **安全, 可以继续**")
+            # 提示: 这个电流下真短接的 IR 降远低于电压表分辨力, 所以上面那个 R
+            # **是电压测量本底除以电流, 不是短接线的电阻**, 别当电阻读。
+            # 要让 R 有意义, 得把电流加大到 mV 量级压降 (如 1 uA x 1 ohm = 1 uV, 仍不够;
+            # 实际要 mA 级才有意义) —— 本自检不为此加大电流。
+            print("      (上面那个 R 别当电阻读: %.0f uV 是电压测量本底,"
+                  " 真短接的 IR 降远低于它)" % (v_chk * 1e6))
         else:
             print("   ** 警告: V = %.3f V, 已接近 limitv —— **输出很可能没有短接**!" % v_chk)
             print("      继续跑会在合规状态下测试, 测到的不是源表本身的特性。")
@@ -279,7 +287,7 @@ def main():
         time.sleep(0.5)
         print("   输出    :", q(smu, 'smua.source.output'))
         print("   offmode :", q(smu, 'smua.source.offmode'),
-              " (2 = OUTPUT_NORMAL)")
+              " (0 = OUTPUT_NORMAL, 1 = HIGH_Z, 2 = ZERO)")
         print("   offfunc :", q(smu, 'smua.source.offfunc'),
               " (0 = OUTPUT_DCAMPS)")
         print("   offlimitv: %.4g V   <- 关输出后线上挂的限压, 越小越安全"

@@ -51,6 +51,18 @@ SETTLE_S = 3.0          # 换点后等源稳定
 READBACK_N = 10         # 每次测量采几个回读值 (需求①要求 10)
 READBACK_DT = 0.1       # 回读轮询间隔
 
+# 测量精度 (2026-09-15 用户要求"调到最高")
+# nplc: 积分多少个工频周期。实测范围 0.01~25 (100 被拒 "Parameter data out of range")。
+#   **1 已经能完全抑制工频** —— 整周期积分把 50Hz 及其谐波都积掉了; 再往上
+#   主要压白噪声。而本工程是在**装置的 1s 窗口内采多个回读值求平均**, 总积分
+#   时间固定 1s -> NPLC=1 采 22 个 与 NPLC=25 采 2 个, 平均值噪声几乎一样。
+#   所以不必顶满, 取 10 兼顾"单次读数噪声"与"窗口内还能采到几个点"。
+#   实测耗时: NPLC=1 每次 45ms, =10 每次 297ms。
+SMU_NPLC = 10
+# autozero: 0=OFF 1=ONCE 2=ON。用**数值**设 —— 常量名 smua.AUTOZERO_ON 在
+#   3.2.1 固件上报 -104 "Data type error" (实测), 数值 2 才是通的。
+SMU_AUTOZERO = 2
+
 # 结果行的解析 (与 nanoammeter_capture.py 一致)
 RESULT_RE = re.compile(
     r"I=(?P<i>[+-][0-9]+\.[0-9]+) nA"
@@ -150,6 +162,9 @@ def smu_open(res):
     #      **这一条决定了 5V 能不能压到 4.5V。**
     #      验证: 设 +45 nA 读 smua.measure.v()。接近 5V 就要调回去并查输入级。
     smu_write(smu, 'smua.source.limitv = 5')
+    # ---- 测量精度 (见文件头 SMU_NPLC 的推导) ----
+    smu_write(smu, 'smua.measure.nplc = %g' % SMU_NPLC)
+    smu_write(smu, 'smua.measure.autozero = %g' % SMU_AUTOZERO)
     smu_write(smu, 'smua.source.output = smua.OUTPUT_OFF')
     return smu
 
