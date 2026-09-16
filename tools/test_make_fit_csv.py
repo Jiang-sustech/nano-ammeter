@@ -4,7 +4,6 @@ make_fit_csv.py 的回归测试 (合成 npz, 不碰硬件)
 
     python tools/test_make_fit_csv.py
 """
-import glob
 import os
 import subprocess
 import sys

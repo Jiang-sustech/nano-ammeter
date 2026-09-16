@@ -104,7 +104,7 @@ node 纳安表控制台_自测.js            # 内联后的整体（25 项）
   > 以上元件值均为**标称值**，绝对增益尚未标定。测得的实际值需复测，
   > 详见 [docs/调试与排障.md](docs/调试与排障.md)。
 - **显示**: SH1106 1.3" OLED（SPI2，SH1106-master 驱动）
-- **串口**: 板载 CH340G（USB-C），USART1 PA9/PA10，115200 8N1
+- **串口**: 板载 CH340G（USB-C），USART1 PA9/PA10，**2 Mbps** 8N1（2026-09-16 从 115200 提升；波特率定义在 `physics_exp_test/Core/Src/uart.c` 的 `BOARD_BAUD`）
 
 ## 测量流程（单次语义）
 
@@ -150,7 +150,7 @@ node 纳安表控制台_自测.js            # 内联后的整体（25 项）
 TIM6"那两截，折算约 0.5~1 pA 的恒定误差）。详见
 [physics_exp_test/README](physics_exp_test/README.md)。
 
-## 串口协议（115200 8N1）
+## 串口协议（2 Mbps 8N1）
 
 | 指令 | 功能 | 响应 |
 |------|------|------|

@@ -47,6 +47,21 @@ except ImportError:
 # 需求① 的点表: +45 递减到 -45, 步长 5
 DEFAULT_POINTS = [45 - 5 * i for i in range(19)]      # 45,40,...,0,...,-45
 
+# 板子串口波特率 —— **115200, 提不上去** (2026-09-16 实测裁定)
+#   **必须与固件 physics_exp_test/Core/Src/uart.c 的 BOARD_BAUD 一致**。
+#
+#   实测 (整窗 12500 字节回传, 每档至少 16 次):
+#       115200  1.085 s  **全清**
+#       921600  0.147 s  89% 一次成功, 11% 需重传; 重传后 0 丢失
+#       2000000 0.073 s  1/16 成功, 13/16 连 4 次重传全失败 -> 不可用
+#   失败率随波特率单调上升 -> 是 CH340G 的带宽问题, 与接地无关
+#   (中途怀疑地线松, 接好后 2 Mbps 重测反而更差, 已排除)。
+#   完整记录见 uart.c 的 BOARD_BAUD 注释。
+#
+#   BAUD_FALLBACK 用来兼容烧了别的波特率的板子 —— board_open() 会自动试。
+BOARD_BAUD = 115200
+BAUD_FALLBACK = 921600
+
 SETTLE_S = 3.0          # 换点后等源稳定
 READBACK_N = 10         # 每次测量采几个回读值 (需求①要求 10)
 READBACK_DT = 0.1       # 回读轮询间隔
@@ -284,30 +299,45 @@ def smu_off(smu):
 
 
 # ---------------------------------------------------------------- 装置 (串口)
-def board_open(port=None):
+def board_open(port=None, baud=BOARD_BAUD):
+    """打开板子串口, 返回 Serial。实际生效的波特率挂在 `s.baud_actual` 上。
+
+    **两个波特率都试**: 固件 (uart.c 的 BOARD_BAUD) 与上位机必须一致,
+    而不一致时的表现是"完全没反应", 跟"板子没插好"长得一模一样。
+    这里按 [baud, BAUD_FALLBACK] 顺序各试一次, 省掉一次误判。
+    """
     if port is None:
         import serial.tools.list_ports as lp
         c = [p.device for p in lp.comports() if p.vid == 0x1A86 and p.pid == 0x7523]
         if not c:
             print("** 找不到 CH340 **"); sys.exit(1)
         port = c[0]
-    s = serial.Serial(port, 115200, timeout=0.2)
-    # 本板自动复位电路拿 DTR/RTS 驱动 NRST/BOOT0 —— 驱动默认置位会把 BOOT0 抬高,
-    # 之后一复位就进 bootloader。释放掉。(R23 已改为 0Ω, 自动路径现在真的能用)
-    try:
-        s.dtr = False
-        s.rts = False
-    except Exception:
-        pass
-    time.sleep(0.4)
-    s.reset_input_buffer()
-    s.write(b'E\n')
-    t0 = time.time()
-    while time.time() - t0 < 4.0:
-        if s.readline().decode(errors='replace').startswith('EXT '):
-            print("    装置就绪 (%s)" % port)
-            return s
-    print("** 装置无响应。检查供电; 给板子断上电一次通常能解决 **")
+
+    tried = []
+    for b in ([baud] if baud == BAUD_FALLBACK else [baud, BAUD_FALLBACK]):
+        s = serial.Serial(port, b, timeout=0.2)
+        # 本板自动复位电路拿 DTR/RTS 驱动 NRST/BOOT0 —— 驱动默认置位会把 BOOT0
+        # 抬高, 之后一复位就进 bootloader。释放掉。(R23 已改为 0Ω, 自动路径现在能用)
+        try:
+            s.dtr = False
+            s.rts = False
+        except Exception:
+            pass
+        time.sleep(0.4)
+        s.reset_input_buffer()
+        s.write(b'E\n')
+        t0 = time.time()
+        while time.time() - t0 < 4.0:
+            if s.readline().decode(errors='replace').startswith('EXT '):
+                s.baud_actual = b
+                tried.append(b)
+                print("    装置就绪 (%s @ %d bps%s)"
+                      % (port, b, "" if b == baud else " —— **回退值, 固件波特率没改成?**"))
+                return s
+        s.close()
+        tried.append(b)
+    print("** 装置无响应 (试过 %s)。检查供电; 给板子断上电一次通常能解决 **"
+          % "/".join(str(t) for t in tried))
     sys.exit(1)
 
 
@@ -362,6 +392,88 @@ def board_measure(ser, timeout=40.0):
                 d['line'] = line
                 return d
     return None
+
+
+def _read_exact(ser, n, timeout):
+    buf = bytearray()
+    t0 = time.time()
+    while len(buf) < n:
+        c = ser.read(n - len(buf))
+        if c:
+            buf += c
+            t0 = time.time()
+        elif time.time() - t0 > timeout:
+            raise TimeoutError("要 %d 字节, 只收到 %d" % (n, len(buf)))
+    return bytes(buf)
+
+
+def board_read_waveform(ser, cmd="X", head_timeout=30.0, body_timeout=3.0,
+                        retries=4, verbose=True):
+    """发一条波形指令并收**整窗**数据, 返回 numpy int64 数组。
+
+    cmd: 'X' = 外部 ADS8866 (表征以它为准), 'B' = 内置 ADC。
+    响应头字分别是 'WAVEX' / 'WAVE'。
+
+    协议: `'<头字> <count>\\r\\n'` + count*2 字节小端 u16 + u16 校验和。
+
+    ⚠️ **校验和必须校验**: 串口丢字节是静默的, 不校验会拿到一条看着正常、
+    实则错位的波形 —— 那种数据比没有更糟。不符直接抛。
+
+    ⚠️ **必须重传, 而且重传是免费的**: 2026-09-16 实测 —— 固件波特率提到
+       2 Mbps 后, **4 次回传里坏了 2 次**, 每次少 1~5 字节, 且丢掉的字节
+       **再也没来**。固件用的是**阻塞式** HAL_UART_Transmit, 所以 MCU 侧不可能
+       丢 —— 丢在 **CH340G -> USB -> 主机** 这一段 (板载是 CH340G 克隆片,
+       2 Mbps 是它的规格上限)。
+       波形还在 MCU 的 `voltage_buf_ext` 里没动, **重发一次 X 就重来一遍**,
+       不产生任何代价 (HTML 上位机里也是这么写的)。
+
+    body_timeout = 3.0 s 是量出来的, 不是拍的: 12500 字节在 921600 下 **136 ms**,
+    在 115200 下 1.09 s。3 s 对 921600 有 22 倍余量、对 115200 有 2.8 倍余量;
+    而字节一旦丢了**再等也不会来**, 所以超时越短越好。
+    (2026-09-16 实测: 921600 下 **11% 的回传需要一次重传**, 89% 一次成功。
+     用 10 s 超时时每次重传白等 10.9 s —— 全程 486 次里约 10 分钟纯等待;
+     改成 3 s 后省约 6 分钟。**没有把 body_timeout 设成 60s 那种** ——
+     最初那版就是 60s, 每次失败白等一分钟。)
+
+    与 `tools/nanoammeter_capture.py` 的 `read_block` 是同一个协议; 那份实现
+    在**模块级解析 sys.argv** (58~62 行), import 会读走调用者的参数, 不能复用,
+    所以在共享库里重写一份。
+    """
+    import numpy as np            # 局部 import: 本模块其他函数不需要 numpy
+
+    head = "WAVEX" if cmd == "X" else "WAVE"
+    last = None
+    for attempt in range(1, retries + 1):
+        try:
+            ser.reset_input_buffer()
+            ser.write((cmd + "\n").encode())
+
+            t0 = time.time()
+            n = None
+            while time.time() - t0 < head_timeout:
+                line = ser.readline().decode(errors="replace").strip()
+                if line.startswith(head + " "):
+                    n = int(line.split()[1])
+                    break
+            if n is None:
+                raise TimeoutError("%s 在 %.0fs 内没有头字" % (cmd, head_timeout))
+
+            data = _read_exact(ser, n * 2 + 2, body_timeout)
+            vals = np.frombuffer(data[:n * 2], dtype="<u2").astype(np.int64)
+            rx = data[n * 2] | (data[n * 2 + 1] << 8)
+            calc = int(vals.sum() & 0xFFFF)
+            if rx != calc:
+                raise ValueError("%s 校验和不符 (算出 0x%04X, 收到 0x%04X)"
+                                 % (head, calc, rx))
+            if verbose and attempt > 1:
+                print("       波形第 %d 次重传才成功" % attempt)
+            return vals
+        except (TimeoutError, ValueError) as e:
+            last = e
+            if attempt < retries:
+                time.sleep(0.3)
+    raise ValueError("%s 连续 %d 次回传都失败, 最后一次: %s"
+                     % (head, retries, last))
 
 
 def board_set_window(ser, ms):

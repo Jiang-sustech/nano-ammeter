@@ -38,6 +38,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# 波特率必须与固件 uart.c 的 BOARD_BAUD 一致, 否则本脚本对板子完全没反应 ——
+# 而症状跟"板子没插好"一模一样, 很容易误判。共享库 (cal_sweep.board_open)
+# 会在 115200/921600 之间自动试, 但本脚本在**模块级解析 sys.argv**, 不方便
+# import, 所以这里写死。
+#   2026-09-16 实测: 115200 全清; 921600 有 11% 要重传; 2 Mbps 不可用。
+#   裁定保持 115200。详见 uart.c 的 BOARD_BAUD 注释。
 BAUD = 115200
 CODE_ZERO = 30787          # 1.55 V level-shift zero, internal code domain
 RAIL_HI = 65520            # measured positive rail of the internal ADC path

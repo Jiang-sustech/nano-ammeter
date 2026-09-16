@@ -31,7 +31,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cal_sweep import (smu_open, smu_off, smu_write, smu_check_errors,
+from cal_sweep import (smu_open, smu_off, smu_write,
                         board_open, board_measure,
                         ReadbackSampler, board_warmup, smu_set)
 
@@ -161,15 +161,30 @@ def print_table(points, dc):
     print("        全部 3 次 ≈ 3 h。")
 
 
-def build_pulse_tsp(i_peak, ton, toff, n_pulse):
-    """生成配置脉冲串的 TSP。**参数顺序待与 2636B 参考手册核对** —— 用 --check 验证。
+def build_pulse_tsp(i_peak, ton, toff, n_pulse, limitv=5.0):
+    """生成配置脉冲串的 TSP。
 
-    思路: 用 ConfigPulseIMeasureVSweepLin 把起止电流设成同一个值, 得到等幅脉冲串。
+    ⚠️ **2026-09-16 修正: 原来这里参数顺序错两位, 什么都没设上。**
+
+    官方签名 (2600B 参考手册, KIPulse 厂脚本) —— **10 个参数**:
+        ConfigPulseIMeasureVSweepLin(smu, bias, start, stop, limit,
+                                     ton, toff, points, buffer, tag)
+    其中 `toff` 是脉冲之间的间隔时间; **周期 = ton + toff**, 没有单独的
+    pulsePeriod 参数; 测量在 **ton 结束**时做。
+
+    原版传的是 8 个:
+        (smua, i_peak, i_peak, n_pulse, ton, toff, buffer, 1)
+    于是 n_pulse 落到 stop、ton 落到 limit、toff 落到 ton、buffer 落到 toff、
+    1 落到 points —— **整体串位两位**。要命的是**不报错** (TSP 自己做了类型
+    转换), 所以脉冲静默地没配出来。`--check` 正是为抓这个写的, 它抓到了:
+    `smua.trigger.source.pulsewidth` 回读是 nil。
+
+    本函数把 bias/start/stop 全设成 i_peak -> 等幅脉冲串 (不扫)。
     """
     return (
         "ConfigPulseIMeasureVSweepLin("
-        "smua, %.9e, %.9e, %d, %.6f, %.6f, smua.nvbuffer1, 1)"
-        % (i_peak, i_peak, n_pulse, ton, toff)
+        "smua, %.9e, %.9e, %.9e, %.6f, %.6f, %.6f, %d, smua.nvbuffer1, 1)"
+        % (i_peak, i_peak, i_peak, limitv, ton, toff, n_pulse)
     )
 
 

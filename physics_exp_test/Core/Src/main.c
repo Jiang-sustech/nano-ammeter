@@ -476,8 +476,10 @@ void SystemClock_Config(void)
   /* 诊断模式: SYSCLK 直接取 HSE, **不过 PLL**。
    * 好处: flash 等待周期只需 0~1 个, 无论晶振多少 MHz 都不会因超频而崩,
    *       也就不会掩盖问题。
-   * 串口波特率随之变成 115200 x F / 80 (F 单位 MHz) —— 扫波特率即可
-   * 反推晶振实际频率。
+   * 串口波特率随之变成 BOARD_BAUD x F / 80 (F 单位 MHz, BOARD_BAUD 见 uart.c)
+   * —— 扫波特率即可反推晶振实际频率。
+   * (注: 这条公式里的基准是 BOARD_BAUD, 不是写死的 115200。2 Mbps 下
+   *  HSE 8 MHz 直连时波特率 = 2000000 x 8/80 = 200 kbps。)
    */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;

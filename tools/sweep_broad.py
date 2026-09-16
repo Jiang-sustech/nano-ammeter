@@ -39,7 +39,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cal_sweep import (smu_open, smu_off, smu_write, smu_check_errors,
+from cal_sweep import (smu_open, smu_off, smu_write,
                         board_open, board_measure,
                         ReadbackSampler, board_warmup, smu_set)
 

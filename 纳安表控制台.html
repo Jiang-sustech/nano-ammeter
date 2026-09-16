@@ -318,6 +318,13 @@
 <script>
 const CH340_FILTER = [{ usbVendorId: 0x1A86, usbProductId: 0x7523 }];
 const WCH_FILTER   = [{ usbVendorId: 0x1A86 }];   /* 任意沁恒 WCH 串口芯片 (兼容 CH340 变种) */
+/* ⚠️ 波特率必须与**所连固件**一致, 不一致时的症状是"连上了但一条数据都不来"
+ *    (Web Serial 用错波特率不会报错), 极易误判成板子坏了。
+ *      本页 115200  <->  中间测试/nano_ammeter/            (竞赛交付固件, 未改)
+ *    physics_exp_test/ 已于 2026-09-16 提到 **2 Mbps**
+ *    (physics_exp_test/Core/Src/uart.c 的 BOARD_BAUD)。
+ *    若要用本页控制 physics_exp_test 那块板子, 把下面改成 2000000。
+ *    Python 侧 (tools/) 已自动在两个波特率间回退, 不依赖这里。 */
 const BAUD = { baudRate: 115200, dataBits: 8, stopBits: 1, parity: 'none' };
 
 /* 滞回阈值 (码域, 与固件一致): 0.131V 和 2.969V -> 3.3V/65536 */

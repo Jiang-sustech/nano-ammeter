@@ -41,7 +41,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cal_sweep import smu_open, smu_set, smu_off, smu_write, smu_check_errors
+from cal_sweep import smu_open, smu_set, smu_off, smu_write
 from sweep_pulse import build_pulse_tsp
 
 # 直流阶梯 (nA)。取的是标定用的那组, 正负兼备
