@@ -112,7 +112,7 @@ void Current_Process(void);            /* TIM6 中断每 160us 调用一次 */
  * 凡是需要"和测量用同一条路"的地方都该用它, 不要直接调 Adc_ReadRaw()。 */
 uint16_t Current_ReadControl(void);
 /* 式(6) —— **全量程唯一的结果计算函数**。
- * 只看窗口的首尾两个码, 分母是 m+n (计数), 所以对 1s 和 10s 窗口同样成立。
+ * 只看窗口的首尾两个码, 分母是 m+n (计数), 所以对任何窗口长度同样成立。
  * 端点码由 Current_GetFirstCode()* 与 Current_GetLastCode()* 给。
  * 内部读全局 m_count/n_count —— 只能在窗口封存后调用。 */
 float Calculate_Current_From(uint16_t c_first, uint16_t c_last);
@@ -120,10 +120,22 @@ uint16_t Current_GetFirstCode(void);     /* 窗口起点 V_01 (内置路) */
 uint16_t Current_GetFirstCodeExt(void);  /* 窗口起点 V_01 (外部路) */
 uint16_t Current_GetLastCode(void);      /* 窗口最后一拍 (内置路) */
 uint16_t Current_GetLastCodeExt(void);   /* 窗口最后一拍 (外部路) */
-/* 窗口长度 (拍)。短 6250 拍 = 1s, 长 62500 拍 = 10s。
- * Current_SetWindowTicks() 必须在 Current_Start() **之前**调用 (Start 按它算抽点)。*/
+/* 窗口长度 (拍)。短 6250 拍 = 1 s, 长 312500 拍 = 50 s。
+ * Current_SetWindowTicks() 必须在 Current_Start() **之前**调用 (Start 按它算抽点)。
+ *
+ * 长窗 2026-09-17 由 **10 s 改成 50 s** (用户要求: 光电流测量绝大多数落在 <1 nA)。
+ * 依据是 σ_I·τ ≈ 0.8 pC 那条不变量 —— 窗口拉长 N 倍, 单次噪声降 √N 倍;
+ * 10 s -> 50 s 换到 √5 ≈ 2.2 倍。实测也印证: 同一段电流, 50 s 窗逐点散布
+ * 0.027 pA, 10 s 窗 0.105 pA (2026-09-16 低电流那两批)。
+ *
+ * ⚠️ **改这个常数必须同时改上位机的等待上限** —— 一次 S 最坏是
+ *    "1 s 判据窗 + 长窗" = 51 s。跟不上就会重现 2026-09-16 那次
+ *    "预热: 无响应" 的假故障 (默认 40 s vs 50 s 窗, 每次都超时)。
+ *    要同步的地方: `纳安表控制台.html` 的 S 步超时、`tools/cal_sweep.py` 的
+ *    board_measure/board_warmup 默认、`tools/nanoammeter_capture.py` 的结果行等待、
+ *    `tools/sweep_dense.py` 与 `warm_test.py` 里按窗口折算超时的那两处。 */
 #define CURRENT_WIN_SHORT_TICKS   6250U     /* 1 s  —— |I| >= 1 nA */
-#define CURRENT_WIN_LONG_TICKS    62500U    /* 10 s —— |I| <  1 nA, 靠时间换信噪比 */
+#define CURRENT_WIN_LONG_TICKS    312500U   /* 50 s —— |I| <  1 nA, 靠时间换信噪比 */
 void Current_SetWindowTicks(uint32_t ticks);
 uint32_t Current_GetWindowTicks(void);      /* 最近窗口的**实际拍数** (结果行 T= 用它) */
 float Current_GetWindowResultExt(void); /* 同一窗口由 ADS8866 算出的结果 */

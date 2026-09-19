@@ -253,13 +253,16 @@ def main():
         sub = int(MANUAL)
         print("[3] M%d: 手动连采 (阻塞约 130ms)" % sub)
         ser.write(("M%d\n" % sub).encode())
-        MANUAL_LINE = wait_line(ser, "MAN DONE", 30.0)
+        # ⚠️ 等待上限必须覆盖固件最长窗口。physics_exp_test 的自动路径在
+        #    |I| < 1 nA 时先跑 1 s 判据窗再跑长窗, 一次最坏 = 1 + 长窗秒。
+        #    长窗 2026-09-17 由 10 s 改成 50 s (current.h), 所以这里 30 -> 60。
+        MANUAL_LINE = wait_line(ser, "MAN DONE", 60.0)
         print("    <- %s" % MANUAL_LINE)
         result_line = MANUAL_LINE
     else:
         print("[3] S: single measurement")
         ser.write(b"S\n")
-        result_line = wait_line(ser, "I=", 30.0)
+        result_line = wait_line(ser, "I=", 60.0)
 
     print("[4] B: internal ADC waveform")
     ser.write(b"B\n")

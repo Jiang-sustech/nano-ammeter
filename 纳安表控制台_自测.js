@@ -196,6 +196,22 @@ function testSetStatus() {
     ['RESULT NONE', '暂无结果', 'idle'],
     /* D 查询成功行: 必须带 (模式n), 否则被通用 I= 正则截获 */
     ['RESULT I=+0.500 nA MODE=2', '+0.500 nA（模式2）', 'run'],
+    /* ⚠️ physics_exp_test 格式: I= 与 MODE= 之间多一段 " X=… nA"。
+     * 2026-09-17 现场回归 —— 少了这几条, 控制台只认 nano_ammeter 的旧格式。 */
+    ['I=+24.776 nA X=+24.776 nA MODE=1 T=1000ms', '+24.776 nA', 'run'],
+    ['I=+24.776 nA X=+24.776 nA MODE=1 T=1000ms TIMEOUT'
+     + ' RAW m=1557 n=4693 INT1=65535 INT2=53513 EXT1=65535 EXT2=65535',
+     '+24.776 nA', 'run'],
+    ['I=+0.000 nA X=+0.000 nA MODE=2 T=10000ms CAL=+0.000'
+     + ' RAW m=31246 n=31254 INT1=30547 INT2=18226 EXT1=30547 EXT2=18226',
+     '+0.000 nA', 'run'],
+    ['RESULT I=+0.000 nA X=+0.000 nA MODE=2', '+0.000 nA（模式2）', 'run'],
+    /* 5 位小数: 2026-09-17 固件把 FormatCurrentNA 量化到 0.01 pA。
+     * 控制台是**原样回显**, 位数不该被它截掉 (低电流段 1 pA 分辨率太粗)。 */
+    ['I=+0.03053 nA X=+0.03053 nA MODE=2 T=50000ms CAL=+0.03053'
+     + ' RAW m=156216 n=156284 INT1=31269 INT2=51185 EXT1=31269 EXT2=51185',
+     '+0.03053 nA', 'run'],
+    ['RESULT I=-0.00631 nA MODE=2', '-0.00631 nA（模式2）', 'run'],
     /* 新固件: 板子忙时丢弃指令并回 BUSY */
     ['BUSY', '板子忙碌中（指令已丢弃）', 'noise'],
     /* STOP IDLE: 数值显示时保留数值, 瞬态文字才换成"已停止" */
@@ -885,6 +901,34 @@ function testCalConvert() {
   assert.strictEqual(d.fA, 0);
 }
 
+/* T39: physics_exp_test 结果行 -> 按钮必须恢复
+ *
+ * 2026-09-17 现场回归。固件发的是
+ *     I=+24.776 nA X=+24.776 nA MODE=1 T=1000ms TIMEOUT RAW m=…
+ * 而控制台当时用的是简化正则 /I=(…) nA MODE=(\d)/ —— 要求 "nA MODE=" 紧邻,
+ * 中间那段 " X=… nA" 让它**匹配不上**。后果不是报错, 而是: 日志照打、
+ * 数值照显示(显示是原样回显), 但 setBusy(false) 永不执行, **按钮一直灰着**,
+ * 表现为"测完一组不会恢复, 没法开始下一次"。
+ *
+ * 这个 bug 能活到现场, 是因为自测**只喂过 nano_ammeter 的旧格式**
+ * (见 T1 与 T2 里的 'I=+12.345 nA MODE=1'), 36 项全过而问题照样在。
+ */
+async function testPhysexpResultRecovers() {
+  setup();
+  currentPort = makeFakePort('P1');
+  await connect();
+  currentPort._push(new TextEncoder().encode('START MODE1\r\n'));
+  await tick(60);
+  assert.strictEqual(els['btnStart'].disabled, true, '测量期间应禁用 S');
+  currentPort._push(new TextEncoder().encode(
+    'I=+24.776 nA X=+24.776 nA MODE=1 T=1000ms TIMEOUT'
+    + ' RAW m=1557 n=4693 INT1=65535 INT2=53513 EXT1=65535 EXT2=53513\r\n'));
+  await tick(60);
+  assert.strictEqual(els['btnStart'].disabled, false,
+                     'physics_exp_test 结果行后按钮必须恢复');
+  assert.strictEqual(els['screenState'].textContent, '+24.776 nA', '应认出结果值');
+}
+
 /* T38: 逐点采集完整流程 —— 填标准值 → 采集 3 次 → 记账 → 表格/CSV 可用 */
 async function testExpAcquireFlow() {
   setup();
@@ -966,6 +1010,7 @@ async function testExpAcquireFlow() {
     ['T36 系数行解析', testCalParse],
     ['T37 a/b 换算 ppm/fA', testCalConvert],
     ['T38 逐点采集流程', testExpAcquireFlow],
+    ['T39 physics_exp_test 结果行 按钮恢复', testPhysexpResultRecovers],
   ];
   let passed = 0, failed = 0;
   for (const [name, fn] of tests) {

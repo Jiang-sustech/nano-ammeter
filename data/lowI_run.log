@@ -1,0 +1,39 @@
+** 预设 lowI: 点表 1,2,4,6,8,10,15,20,30,50,100,200,300,500,1000,2000,4000 pA, 强制窗口 50000 ms (|I| <= 20 pA) **
+==============================================================================
+密集电流网格扫描 —— 每次测量整窗回传
+==============================================================================
+网格:   -4 ~ +4 nA, 34 个电流点 (正负都有)
+        点表: 0.001 0.002 0.004 0.006 0.008 0.01 0.015 0.02 0.03 0.05 0.1 0.2 0.3 0.5 1 2 4
+每点:   3 次   ->  共 **102 次测量**
+串口:   115200 bps   (整窗 12500 字节回传 1.085 s)
+窗口:   |I| <= 20 pA 的 16 点强制 50000 ms; 其余交回固件自动
+        (固件自动: >=1 nA -> 1 s, <1 nA -> 10 s)
+预热:   always  (共空跑 34 次)
+估算:   平均每次测量 28.42 s  ->  约 **66 分钟**
+  拆开: 整定 3.0 s/点 | 测量 x3/点 | 预热 x1/点
+存档:   data/lowI/raw.csv  (26 列, 每行写完立刻落盘)
+        data/lowI/w_*.npz  (整窗 6250 点)
+
+⚠️  预计超过 1 小时。确认无误再跑; 中途 Ctrl-C 不会丢数据,
+    重跑本命令会自动跳过已完成的部分。
+
+    装置就绪 (COM6 @ 115200 bps)
+    型号: 2636B
+──  +0.0010 nA  (1/102)
+   窗口: WIN 50000ms (312500 ticks)
+   档位 1e-09 A
+Traceback (most recent call last):
+  File "C:\Users\40512\STM32Toolchain\nanoammeter_repo\tools\sweep_dense.py", line 395, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\40512\STM32Toolchain\nanoammeter_repo\tools\sweep_dense.py", line 301, in main
+    print("   ", board_warmup(ser, wto))
+                 ~~~~~~~~~~~~^^^^^^^^^^
+  File "C:\Users\40512\STM32Toolchain\nanoammeter_repo\tools\cal_sweep.py", line 509, in board_warmup
+    d = board_measure(ser, timeout)
+  File "C:\Users\40512\STM32Toolchain\nanoammeter_repo\tools\cal_sweep.py", line 387, in board_measure
+    line = ser.readline().decode(errors='replace').strip()
+           ~~~~~~~~~~~~^^
+  File "C:\Python314\Lib\site-packages\serial\serialwin32.py", line 295, in read
+    raise SerialException("GetOverlappedResult failed ({!r})".format(ctypes.WinError()))
+serial.serialutil.SerialException: GetOverlappedResult failed (PermissionError(13, '�ܾ����ʡ�', None, 5))

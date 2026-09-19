@@ -86,11 +86,32 @@ CSV_COLS = ['set_nA', 'rep', 'true_nA', 'dev_nA', 'dev_ext_nA',
             't_meas_ms', 't_xfer_ms', 'npz', 'line']
 
 
-def grid(lo, hi, step, both=True):
-    """lo..hi 步长 step, 可选镜像到负向。"""
+def grid(lo, hi, step, sign='both'):
+    """lo..hi 步长 step; sign 决定取正的 / 负的 / 正负都有。"""
     n = int(round((hi - lo) / step))
     pts = [round(lo + i * step, 6) for i in range(n + 1)]
-    return pts + [-p for p in reversed(pts)] if both else pts
+    return mirror(pts, sign)
+
+
+def mirror(base, sign):
+    """把「幅值点表」按 sign 展开成正的 / 负的 / 正负都有。
+
+    点表一律写**幅值**(正数) —— `lowI` 预设的 `1,2,4,...` 就是幅值。
+
+    2026-09-16 加 `--neg-only`: 负向亚纳安扫描要**单跑一批**, 而原来只有
+    `--pos-only`, 想只扫负的就得把整张 17 点表逐个加负号手打一遍, 还会打错。
+    负向那批的 npz 名 (safe_name) 把 '-' 换成 'n', 与正向的 'p' 天然不撞,
+    所以两批可以各存一个目录、也可以合存。
+    """
+    if sign == 'pos':
+        return list(base)
+    if sign == 'neg':
+        # **不倒序** —— 正向那批是 1pA -> 4nA (幅值从小到大), 负向批次也按
+        # 幅值从小到大, 两批的"第 k 个点"才落在同一段测量时间内。
+        # 若照 --both 那样倒序, 负向会变成 -4nA 起, 与正向批次的时间轴反着走,
+        # 事后比较两批的漂移就对不齐了。
+        return [-p for p in base]
+    return list(base) + [-p for p in reversed(base)]
 
 
 # 预设点表: (点表字符串 pA, 强制窗口 ms, 阈值 pA)
@@ -125,6 +146,9 @@ def main():
     ap.add_argument('--hi', type=float, default=45.0, help='最大 |I| (nA)')
     ap.add_argument('--step', type=float, default=0.5, help='电流步长 (nA)')
     ap.add_argument('--pos-only', action='store_true', help='只扫正电流')
+    ap.add_argument('--neg-only', action='store_true',
+                    help='只扫负电流 (负向亚纳安那批用这个)。'
+                         '点表仍按**幅值**写, 本开关负责整条镜像过去')
     ap.add_argument('--preset', default=None, choices=sorted(PRESETS),
                     help='预设点表, 省得手打。lowI = 1 pA~4 nA 的分级网格'
                          ' (低端每 2 pA + 50 s 长窗, 高端交回自动)。'
@@ -133,10 +157,17 @@ def main():
                     help='显式点表 (**单位 pA**, 逗号分隔), 覆盖 --lo/--hi/--step。'
                          '分级网格必须用它 —— 均匀步长在低电流端会把点数压成 1 个: '
                          '「1 pA 起、每 20 pA 一点」在 1~20 pA 段只拿到起点那一个点, '
-                         '而 1~5 nA 段拿到 249 个。')
+                         '而 1~5 nA 段拿到 249 个。'
+                         '默认按**幅值**解释并镜像; 要带符号的单向表见 --signed')
+    ap.add_argument('--signed', action='store_true',
+                    help='--points 给的就是**完整的带符号点表**, 不要再镜像。'
+                         '负到正的单向扫描 (如 -10 nA .. +10 nA 每 1 nA) 必须用它: '
+                         '普通路径会把点表当幅值, 于是 0 被镜像两次变成两个点, '
+                         '而负值会被再取一次负变回正的。'
+                         '**顺序按你给的顺序原样保留** (普通路径会排序)。')
     ap.add_argument('--win-ms', type=float, default=0.0,
                     help='强制窗口长度 (ms), 配 --win-below-pa 用。'
-                         '0 = 不强制, 交回固件自动 (固件: >=1 nA -> 1 s, <1 nA -> 10 s)')
+                         '0 = 不强制, 交回固件自动 (固件: >=1 nA -> 1 s, <1 nA -> 50 s)')
     ap.add_argument('--win-below-pa', type=float, default=0.0,
                     help='|设定| <= 这个值 (pA) 的点用 --win-ms 的窗口')
     ap.add_argument('--warm-ms', type=float, default=0.0,
@@ -170,11 +201,29 @@ def main():
         print("** 预设 %s: 点表 %s pA, 强制窗口 %g ms (|I| <= %g pA) **"
               % (a.preset, _p, _w, _b))
 
-    if a.points:
+    if a.pos_only and a.neg_only:
+        sys.exit("--pos-only 与 --neg-only 互斥 —— 都不给就是正负都扫")
+    if a.signed and (a.pos_only or a.neg_only):
+        sys.exit("--signed 与 --pos-only/--neg-only 互斥: 带符号点表本身就定死了正负")
+    sign = 'pos' if a.pos_only else ('neg' if a.neg_only else 'both')
+
+    if a.points and a.signed:
+        # 带符号单向表: 原样保留顺序, 不排序、不镜像。
+        # ⚠️ 去重**不能**用 set —— set 会打乱顺序, 而 "从 -10 走到 +10" 这个
+        #    顺序本身就是需求的一部分 (单向扫描, 时间轴单调)。
+        raw = [float(x) / 1000.0 for x in a.points.split(',')]
+        pts, seen = [], set()
+        for v in raw:
+            if v in seen:
+                print("   ⚠️ 点表里有重复值 %+g nA, 已跳过" % v)
+                continue
+            seen.add(v)
+            pts.append(v)
+    elif a.points:
         base = sorted({float(x) / 1000.0 for x in a.points.split(',')})
-        pts = base + ([-p for p in reversed(base)] if not a.pos_only else [])
+        pts = mirror(base, sign)
     else:
-        pts = grid(a.lo, a.hi, a.step, both=not a.pos_only)
+        pts = grid(a.lo, a.hi, a.step, sign=sign)
     total = len(pts) * a.n
 
     def win_of(i_nA):
@@ -184,11 +233,17 @@ def main():
         return 0.0
 
     def wsec(i_nA):
-        """该点实际窗口长 (s) —— 强制的按强制算, 其余的按固件自动规则推。"""
+        """该点实际窗口长 (s) —— 强制的按强制算, 其余的按固件自动规则推。
+
+        ⚠️ 这里的 50.0 是**固件自动长窗**的长度, 必须与
+        physics_exp_test/Core/Inc/current.h 的 CURRENT_WIN_LONG_TICKS 一致
+        (2026-09-17 由 10 s 改成 50 s)。它喂给 m_timeout = wtot + 30,
+        算小了就会在低电流点上误报 TIMEOUT。
+        """
         w = win_of(i_nA)
         if w:
             return w / 1000.0
-        return 1.0 if abs(i_nA) >= 1.0 else 10.0
+        return 1.0 if abs(i_nA) >= 1.0 else 50.0
 
     # ⚠️ settle 与预热是**每个电流点一次**, 不是每次测量一次。
     #    第一版把 settle 按"每次测量"算, 估出 51 分钟 —— 实际约一半。
@@ -211,11 +266,17 @@ def main():
     print("=" * 78)
     print("网格:   %+g ~ %+g nA, %d 个电流点%s%s"
           % (min(pts), max(pts), len(pts),
-             " (只正)" if a.pos_only else " (正负都有)",
+             " (带符号单向)" if a.signed else
+             {'pos': " (只正)", 'neg': " (只负)", 'both': " (正负都有)"}[sign],
              "" if a.points else ", 步长 %g" % a.step))
     if a.points:
-        print("        点表: %s" % " ".join("%g" % p for p in
-                                            sorted({abs(p) for p in pts})))
+        if a.signed:
+            # 带符号表**按给定顺序**打出来 —— 顺序是需求的一部分, 去重排序就看不出来了
+            print("        点表(按扫描顺序): %s"
+                  % " ".join("%+g" % p for p in pts))
+        else:
+            print("        点表: %s" % " ".join("%g" % p for p in
+                                                sorted({abs(p) for p in pts})))
     print("每点:   %d 次   ->  共 **%d 次测量**" % (a.n, total))
     print("串口:   %d bps   (整窗 %d 字节回传 %.3f s)"
           % (a.baud, 6250 * 2, xfer))
@@ -223,7 +284,7 @@ def main():
         n50 = sum(1 for p in pts if win_of(p) > 0)
         print("窗口:   |I| <= %g pA 的 %d 点强制 %g ms; 其余交回固件自动"
               % (a.win_below_pa, n50, a.win_ms))
-        print("        (固件自动: >=1 nA -> 1 s, <1 nA -> 10 s)")
+        print("        (固件自动: >=1 nA -> 1 s, <1 nA -> 50 s)")
     print("预热:   %s  (共空跑 %d 次%s)"
           % (a.warmup, n_warm,
              ", 窗口 %g ms" % a.warm_ms if a.warm_ms > 0 else ""))
@@ -293,7 +354,12 @@ def main():
                 if a.warm_ms > 0:
                     board_set_window(ser, a.warm_ms)
                 tw = time.time()
-                print("   ", board_warmup(ser))
+                # ⚠️ **必须把窗口长度对应的超时传进去** —— `board_warmup()` 的默认
+                #    超时是 40 s, 而低电流段窗口是 50 s, 于是**每次预热都必然超时**,
+                #    预热等于没做, 还白等 40 秒。2026-09-16 实跑第一次就撞上
+                #    (日志里 "预热: 无响应")。
+                wto = (a.warm_ms / 1000.0 + 30.0) if a.warm_ms > 0 else m_timeout
+                print("   ", board_warmup(ser, wto))
                 t_warm_ms = int((time.time() - tw) * 1000)
                 warmed = True
                 if a.warm_ms > 0:            # 预热用了短窗 -> 恢复测量窗口

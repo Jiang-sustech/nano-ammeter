@@ -67,7 +67,7 @@ def main():
 
     pts = [float(x) for x in a.points.split(',')]
     tot = sum(a.rounds * a.n * (a.win_ms / 1000.0 if a.win_ms else
-                                (1.0 if p >= 1000 else 10.0)) for p in pts)
+                                (1.0 if p >= 1000 else 50.0)) for p in pts)   # 50 = 固件自动长窗
     print("=" * 76)
     print("预热必要性测试 (每轮: 重新设电流 -> 整定 -> **不预热** -> 连测)")
     print("=" * 76)
@@ -83,7 +83,7 @@ def main():
             i_nA = p_pa / 1000.0
             wms = (a.win_ms if (a.win_ms > 0
                                 and abs(p_pa) <= a.win_below_pa) else 0.0)
-            wtot = (wms / 1000.0) if wms else (1.0 if p_pa >= 1000 else 10.0)
+            wtot = (wms / 1000.0) if wms else (1.0 if p_pa >= 1000 else 50.0)
             mto = wtot + 30.0
             print("── %g pA   窗口 %s" % (p_pa, "%g ms (强制)" % wms if wms else "自动"))
             board_set_window(ser, wms)

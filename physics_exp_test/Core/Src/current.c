@@ -210,17 +210,20 @@ static volatile uint8_t sel_state;
  *
  * 窗口长度按电流自适应:
  *     |I| >= 1 nA  ->   1 秒   (WINDOW_SHORT_TICKS)
- *     |I| <  1 nA  ->  10 秒   (WINDOW_LONG_TICKS)   <- 小电流端靠时间换信噪比
+ *     |I| <  1 nA  ->  50 秒   (CURRENT_WIN_LONG_TICKS, current.h)
  *
  * **原来的"小电流模式"(参考断开 + 纯积分) 已删除。** 它是第二套逻辑, 符号
  * 约定各自实现了一遍, 结果就分叉了 —— 2026-09-13 实测抓到一次符号反了
  * (码域与电压域差一层反相)。一条路就不存在分叉。
  *
- * 波形缓冲不能跟着窗口涨: 10s = 62500 拍, 两路要 250KB, 而 L431 只有 64KB。
+ * 波形缓冲不能跟着窗口涨: 50s = 312500 拍, 两路要 1.2MB, 而 L431 只有 64KB。
  * 所以按 window_decim 抽点存, 只供 B/X 回传。**结果计算不用这个缓冲** ——
  * 端点码单独记 (v_last_*), 与抽点无关。 */
 #define WINDOW_SHORT_TICKS  TOTAL_CYCLE         /* 6250 拍 = 1 s */
-#define WINDOW_LONG_TICKS   (TOTAL_CYCLE * 10U) /* 62500 拍 = 10 s */
+/* 长窗的**唯一权威定义**在 current.h 的 CURRENT_WIN_LONG_TICKS。
+ * 这里曾另有一个 WINDOW_LONG_TICKS = TOTAL_CYCLE*10, 从未被使用, 却与头文件
+ * 各说各话 —— 2026-09-17 把长窗从 10 s 改成 50 s 时才发现这个死重复。
+ * 会漂移的重复定义就是地雷, 已删; 要长窗长度请用 CURRENT_WIN_LONG_TICKS。 */
 
 static volatile uint32_t window_ticks = WINDOW_SHORT_TICKS;  /* 本次窗口长度 (拍) */
 static uint32_t          window_decim;                       /* 抽点存波形的间隔 */
@@ -414,7 +417,8 @@ void Current_Process(void)
     }
 
     /* 抽点存波形 —— 只供 B/X 回传, **结果计算不看它** (端点码走 v_last_*)。
-     * 10s 窗口抽 10 倍, 所以缓冲始终覆盖整段且不超过 TOTAL_CYCLE 点。 */
+     * 长窗抽点倍率 = window_ticks/TOTAL_CYCLE (50s 窗 -> 50 倍), 所以缓冲
+     * 始终覆盖整段且不超过 TOTAL_CYCLE 点。 */
     if ((window_decim <= 1U) || (((m_count + n_count) % window_decim) == 0U))
     {
         if (sample_index < TOTAL_CYCLE)
@@ -452,7 +456,7 @@ void Current_Process(void)
 
     if ((m_count + n_count) >= window_ticks)
     {
-        /* 窗口完成 (长度由 window_ticks 决定, 1s 或 10s)。中断内先算结果;
+        /* 窗口完成 (长度由 window_ticks 决定)。中断内先算结果;
          * 单次测量下主循环随后会停 TIM6, 抽点后的波形留在缓冲里供 B/X 回传 */
         window_current     = Calculate_Current_From(v01_int, v_last_int);
         window_current_ext = Calculate_Current_From(v01_ext, v_last_ext);
@@ -494,7 +498,7 @@ float Calculate_Current_From(uint16_t c_first, uint16_t c_last)
      * (旧设计窗口两端是窗口内的采样点, 只有 N-1 个间隔而计数有 N 拍, 才要减一,
      *  而且减在哪个计数器上还依赖开窗极性 —— 那个纠缠随这次重构一起消失了)
      *
-     * 分母是 m+n 而**不是任何硬编码的拍数** —— 所以这个式子对 1s 和 10s 窗口
+     * 分母是 m+n 而**不是任何硬编码的拍数** —— 所以这个式子对任何窗口长度
      * 同样成立, 换窗口长度不需要换公式。这是"全量程一套逻辑"的支点。 */
     dc = (float)c_last - (float)c_first;
 
@@ -516,12 +520,12 @@ float Calculate_Current_From(uint16_t c_first, uint16_t c_last)
 uint16_t Current_GetFirstCode(void)    { return v01_int; }
 uint16_t Current_GetFirstCodeExt(void) { return v01_ext; }
 
-/* 窗口最后一拍 —— 每拍都更新, 与抽点存缓冲无关 (10s 窗口下缓冲是抽点过的,
+/* 窗口最后一拍 —— 每拍都更新, 与抽点存缓冲无关 (长窗下缓冲是抽点过的,
  * 拿 buf[末尾] 当终点会错) */
 uint16_t Current_GetLastCode(void)    { return v_last_int; }
 uint16_t Current_GetLastCodeExt(void) { return v_last_ext; }
 
-/* 窗口长度 (拍)。短 6250 拍 = 1s, 长 62500 拍 = 10s。
+/* 窗口长度 (拍)。短 6250 拍 = 1 s; 长的见 current.h 的 CURRENT_WIN_LONG_TICKS。
  * 换长度必须在 Current_Start() **之前**调用 —— Current_Start 会按它算抽点间隔。 */
 void Current_SetWindowTicks(uint32_t ticks)
 {
@@ -529,7 +533,7 @@ void Current_SetWindowTicks(uint32_t ticks)
 }
 
 /* 最近一个窗口的**实际拍数** —— 结果行的 T= 用它。
- * (不能用 Current_GetSampleCount(): 那是抽点后的**存储点数**, 10s 窗口下只有
+ * (不能用 Current_GetSampleCount(): 那是抽点后的**存储点数**, 长窗下只有
  *  6250, 拿它算 T= 会少报 10 倍) */
 uint32_t Current_GetWindowTicks(void)
 {

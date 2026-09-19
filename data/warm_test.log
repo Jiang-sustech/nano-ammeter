@@ -1,0 +1,31 @@
+============================================================================
+é¢„çƒ­å¿…è¦æ€§æµ‹è¯• (æ¯è½®: é‡æ–°è®¾ç”µæµ -> æ•´å®š -> **ä¸é¢„çƒ­** -> è¿æµ‹)
+============================================================================
+ç”µæµ: 20,2000 pA   æ¯ç‚¹ 3 è½® x 3 æ¬¡
+ä¼°ç®—: çº¦ 15 åˆ†é’Ÿ (ä¸å«æ•´å®š)
+
+    è£…ç½®å°±ç»ª (COM6 @ 115200 bps)
+    å‹å·: 2636B
+â”€â”€ 20 pA   çª—å£ 50000 ms (å¼ºåˆ¶)
+   è½®1:   +0.0200    +0.0200  æ— å“åº”
+Traceback (most recent call last):
+  File "C:\Users\40512\STM32Toolchain\nanoammeter_repo\tools\warm_test.py", line 186, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\40512\STM32Toolchain\nanoammeter_repo\tools\warm_test.py", line 118, in main
+    smu_write(smu, 'smua.source.output = smua.OUTPUT_OFF')
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\40512\STM32Toolchain\nanoammeter_repo\tools\cal_sweep.py", line 290, in smu_write
+    smu.write(tsp)          # ÕâÀï±ØĞëÓÃÂã write, ²»ÄÜÔÙÌ× smu_write (ÎŞÏŞµİ¹é)
+    ~~~~~~~~~^^^^^
+  File "C:\Python314\Lib\site-packages\pyvisa\resources\messagebased.py", line 213, in write
+    count = self.write_raw(message.encode(enco))
+  File "C:\Python314\Lib\site-packages\pyvisa\resources\messagebased.py", line 173, in write_raw
+    return self.visalib.write(self.session, message)[0]
+           ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\site-packages\pyvisa_py\highlevel.py", line 574, in write
+    written, status_code = self.sessions[session].write(data)
+                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Python314\Lib\site-packages\pyvisa_py\tcpip.py", line 1289, in write
+    size = self.interface.send(block)
+ConnectionResetError: [WinError 10054] Ô¶³ÌÖ÷»úÇ¿ÆÈ¹Ø±ÕÁËÒ»¸öÏÖÓĞµÄÁ¬½Ó¡£

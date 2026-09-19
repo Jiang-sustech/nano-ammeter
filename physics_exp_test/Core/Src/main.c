@@ -74,13 +74,24 @@ static void OLED_DrawScreen(const char *value, const char *unit, const char *mod
     SH1106_Flush();
 }
 
-/* 电流 -> nA 3 位小数文本 (单位 0.001 nA) */
+/* 电流 -> nA 文本。**量化到 0.01 pA** (nA 保留 5 位小数)。
+ *
+ * 2026-09-17 由 3 位小数 (= 整 pA) 改成 5 位。依据是噪声, 不是想要更多数字:
+ * 50 s 窗下单次噪声约 **0.045 pA** (σ_I·τ≈0.8 pC 那条不变量给 0.016 pA),
+ * 而旧的 1 pA 步长比它粗 20 倍 —— 低电流段(光电流那批 ~10 pA)的真实结构
+ * 被显示分辨率吃掉了。0.01 pA 是噪声的 1/4, 位数站得住; 再细就是假精度。
+ *
+ * 实现: pA 值乘 100 变成"以 0.01 pA 为单位"的整数, 再印 5 位小数。
+ * ⚠️ 上限因此不能再用 9.0e18 —— 乘 100 会溢出 int64, 收到 9.0e16。
+ *    这个上限纯属溢出保险丝 (物理量程只有 ±50 nA), 不参与任何判据。
+ * ⚠️ 值字符串最长 1+17+1+5 = 24 字节 + NUL, 调用处的缓冲已相应加大
+ *    (UART_SendResultLine 的 vi/vx/vc 与 line, UART_SendResultQuery 的 v)。 */
 static void FormatCurrentNA(float current, char *buf)
 {
     double v = (double)current * 1e12;
-    if (v > 9.0e18) v = 9.0e18;
-    if (v < -9.0e18) v = -9.0e18;
-    UART_FormatScaled((int64_t)v, 3, buf);
+    if (v > 9.0e16) v = 9.0e16;
+    if (v < -9.0e16) v = -9.0e16;
+    UART_FormatScaled((int64_t)(v * 100.0), 5, buf);
 }
 
 /* 结果行: 两个 ADC 的结果都报, 校准生效且非超时时再追加校准值。
@@ -98,22 +109,23 @@ static void FormatCurrentNA(float current, char *buf)
  * 就丢了 —— 而 (m+n) 与 (m+n-1) 两种分母之争、以及分段系数 a/b 的拟合,
  * 都得从**同一次测量**的原始量出发, 不然只能靠反推。报告的表 4-9~4-14 也用得上。
  *
- * 两种窗口 (MODE=1 的 1s / MODE=2 的 10s) 都出这一段 —— 它们是同一条测量
+ * 两种窗口 (MODE=1 的 1s / MODE=2 的长窗) 都出这一段 —— 它们是同一条测量
  * 逻辑, 只是窗口长度不同 (2026-09-13 重构前, MODE=2 是另一套不算 m/n 的模式)
  * 两段平均, 原始量是另一套 (结果行的 T= 已经给了它的实际积分拍数)。 */
 static void UART_SendResultLine(float cur_int, float cur_ext, uint8_t mode,
                                 uint8_t timeout)
 {
-    char vi[24], vx[24], vc[24];
-    /* 最坏情况: 三个值各占满 24 字节 -> 2+24+6+24+8+1+5+24+2 = 96;
-     * 再加 RAW 段 (最长约 60 字节) 与结尾 NUL。192 留足余量, snprintf 兜底 */
-    char line[192];
+    char vi[32], vx[32], vc[32];
+    /* 最坏情况: 三个值各占满 32 字节 -> 2+32+6+32+8+1+5+32+2 = 120;
+     * 再加 RAW 段 (最长约 60 字节) 与结尾 NUL。256 留足余量, snprintf 兜底。
+     * (值改 5 位小数后单值最长 1+17+1+5=24 字节+NUL, 原来的 24 会截断) */
+    char line[256];
     char raw[80] = "";
 
     FormatCurrentNA(cur_int, vi);
     FormatCurrentNA(cur_ext, vx);
 
-    /* MODE=1 (1s 窗口) 与 MODE=2 (10s 长窗口) 是**同一条测量逻辑**, 都出 RAW 段。
+    /* MODE=1 (1s 窗口) 与 MODE=2 (长窗口) 是**同一条测量逻辑**, 都出 RAW 段。
      * 2026-09-13 重构前这里是 `mode == 1U` —— 那时 MODE=2 是另一套不算 m/n 的模式;
      * 现在留着会把长窗口的 RAW 整段跳掉。 */
     if ((mode == 1U) || (mode == 2U))
@@ -159,8 +171,8 @@ static void UART_SendResultLine(float cur_int, float cur_ext, uint8_t mode,
 /* D 指令: 查询最近结果 */
 static void UART_SendResultQuery(void)
 {
-    char v[24];
-    char line[72];
+    char v[32];
+    char line[96];
 
     if (!has_result)
     {
@@ -343,7 +355,7 @@ int main(void)
        *   K<段>,<a_ppm>,<b_fA> 写入分段系数        Z 清除分段系数
        *   Q                    查询物理常数 q/I+/I-
        *   Q<q_aC>,<i+_pA>,<i-_pA>  写入物理常数
-       *   T<ms>                强制窗口长度 (毫秒); T0 = 回到自动 (1s/<1nA 换 10s)
+       *   T<ms>                强制窗口长度 (毫秒); T0 = 回到自动 (1s/<1nA 换长窗)
        *
        * 注意 T 的一进一出, 别混:
        *   T<ms>  (指令, 发进来)  = 设定窗口长度
@@ -371,7 +383,7 @@ int main(void)
         }
         else if (cmd == 'T')
         {
-          /* T<ms>: **强制窗口长度** (毫秒); T0 = 回到自动 (1s, <1nA 时换 10s)。
+          /* T<ms>: **强制窗口长度** (毫秒); T0 = 回到自动 (1s, <1nA 时换长窗)。
            * 1 拍 = 160us -> ticks = ms*1000/160 = ms*25/4。
            * 用途: 1~20 pA 那一段 10s 窗口信噪比不够, 要 50s (T50000)。
            * 按幅值自动切换做不到 —— 20 pA 与 50 pA 都 <1nA, 区分不开。 */
@@ -567,8 +579,9 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 
 /* 测量任务: 主循环每轮调用, 非阻塞推进
- * 一次测量 = 1s 窗口; 若 |I|<1nA 自动换 10s 窗口重测一次, 然后出结果。
- * 注: 结果行的 MODE= 仍是 1/2 —— 2 表示"用的是 10s 长窗口"。
+ * 一次测量 = 1 s 窗口; 若 |I|<1nA 自动换**长窗**重测一次, 然后出结果。
+ * 长窗长度 = CURRENT_WIN_LONG_TICKS (2026-09-17 起 50 s, 原 10 s)。
+ * 注: 结果行的 MODE= 仍是 1/2 —— 2 表示"用的是长窗口", **具体长度看 T=**。
  *     两条路现在是**同一个公式**, MODE 只是告诉上位机窗口长度不同
  *     (顺带: 长窗口也会出 RAW 段了, 不像原来那个独立的小电流模式)。 */
 static void Measurement_Task(void)
@@ -577,15 +590,15 @@ static void Measurement_Task(void)
 
   if (process_result == MEASUREMENT_LONGW_STARTED)
   {
-    OLED_DrawScreen("+0.000", "nA", "LONG WIN 10s");
-    UART_SendString("LONGW START (I<1nA, 10s window)\r\n");
+    OLED_DrawScreen("+0.000", "nA", "LONG WIN 50s");
+    UART_SendString("LONGW START (I<1nA, 50s window)\r\n");
   }
   else if (process_result == MEASUREMENT_RESULT_READY)
   {
     float current = MeasurementState_GetResult();
     uint8_t longw = MeasurementState_ResultIsLongW();
     uint8_t timeout = MeasurementState_ResultIsTimeout();
-    char v[24];
+    char v[32];     /* 5 位小数下最长 24 字节 + NUL, 24 会截断 */
 
     has_result = 1;
     FormatCurrentNA(current, v);
@@ -593,7 +606,7 @@ static void Measurement_Task(void)
                         longw ? 2U : 1U, timeout);
     /* timeout 现在表示"拉回相守卫超时"= 读数不可信 (原来是"长窗口超时")。
      * OLED 上要明确写成"数据无效", 不能让人以为只是窗口不一样。 */
-    OLED_DrawScreen(v, "nA", timeout ? "INVALID PRE" : (longw ? "MODE:10s" : "MODE:MEASURE"));
+    OLED_DrawScreen(v, "nA", timeout ? "INVALID PRE" : (longw ? "MODE:50s" : "MODE:MEASURE"));
   }
 }
 

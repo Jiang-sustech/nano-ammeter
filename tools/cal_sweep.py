@@ -66,6 +66,15 @@ SETTLE_S = 3.0          # 换点后等源稳定
 READBACK_N = 10         # 每次测量采几个回读值 (需求①要求 10)
 READBACK_DT = 0.1       # 回读轮询间隔
 
+# 单次 S 的等待上限。**必须覆盖固件的最长窗口** —— physics_exp_test 的自动路径
+# 在 |I| < 1 nA 时会先跑 1 s 判据窗、再跑长窗, 所以一次 S 最坏 = 1 + 长窗。
+#   2026-09-17: 长窗由 10 s 改成 50 s (current.h 的 CURRENT_WIN_LONG_TICKS),
+#               这个值跟着从 40 提到 60。
+# ⚠️ 跟不上窗口的症状是**假故障**: 2026-09-16 撞过一次 —— board_warmup 默认 40 s
+#    而窗口 50 s, 于是每次预热都"无响应", 等于没预热, 还白等 40 秒/点。
+#    改固件那个常数时, 这里和下面 board_measure/board_warmup 的默认值要一起看。
+MEASURE_TIMEOUT_S = 60.0
+
 # 测量精度 (2026-09-15 用户要求"调到最高")
 # nplc: 积分多少个工频周期。实测范围 0.01~25 (100 被拒 "Parameter data out of range")。
 #   **1 已经能完全抑制工频** —— 整周期积分把 50Hz 及其谐波都积掉了; 再往上
@@ -378,7 +387,7 @@ class ReadbackSampler(threading.Thread):
         return [self.vals[i] for i in idx]
 
 
-def board_measure(ser, timeout=40.0):
+def board_measure(ser, timeout=MEASURE_TIMEOUT_S):
     """发 S 等结果行。返回解析后的 dict (没等到返回 None)。"""
     ser.reset_input_buffer()
     ser.write(b'S\n')
@@ -495,7 +504,7 @@ def board_set_window(ser, ms):
     return None
 
 
-def board_warmup(ser, timeout=40.0):
+def board_warmup(ser, timeout=MEASURE_TIMEOUT_S):
     """预热: 空测一次并丢弃。
 
     **为什么需要** (2026-09-13 实测): 一批测量里**第一次总是坏的** ——

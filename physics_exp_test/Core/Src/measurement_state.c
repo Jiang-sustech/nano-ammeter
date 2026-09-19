@@ -6,29 +6,31 @@
 /* ============================================================
  * 测量状态机 (单次测量语义):
  *   IDLE -> (S 指令) -> 窗口(1s) -> |I| >= 1nA: 出结果, 回 IDLE
- *                                -> |I| <  1nA: 换 10s 窗口重测一次 -> 出结果
+ *                                -> |I| <  1nA: 换长窗重测一次 -> 出结果
  *   一次指令 = 一次完整测量, 测完停住 (TIM6 停 + ADG 关断);
  *   无取消/无连续模式 (越简单越可靠), 测量期间忽略一切指令
  *
  * 2026-09-13 重构: **全量程只有一套测量逻辑** (电荷平衡, 见 current.c 的
  * 测量窗口注释)。原来 |I|<1nA 会切到独立的"小电流模式"(参考断开+纯积分),
  * 那是第二套逻辑 —— 符号约定各自实现一遍, 结果就分叉了 (实测抓到一次符号反)。
- * 现在小电流端只是**把窗口从 1s 拉到 10s**, 公式一个字都不用改
+ * 现在小电流端只是**把窗口从 1 s 拉到 CURRENT_WIN_LONG_TICKS** (现 50 s), 公式一个字都不用改
  * (分母是 m+n, 与窗口长度无关)。
  *
  * 状态也少了一个: 换窗口后仍然停在 MODE1, 只是窗口长了。用一个标志位
  * (long_tried) 保证只换一次, 不会来回切。
  * ============================================================ */
 
-#define DIRECT_MEASURE_THRESHOLD 1e-9f   /* 1nA: 低于则换 10s 窗口重测 */
+#define DIRECT_MEASURE_THRESHOLD 1e-9f   /* 1nA: 低于则换**长窗**重测
+                                          * (长窗长度 = CURRENT_WIN_LONG_TICKS,
+                                          *  2026-09-17 起是 50 s; 原 10 s) */
 
 static MeasurementState measurement_state;
 static float measurement_result;            /* 内置 ADC 算出的结果 */
 static float measurement_result_ext;        /* ADS8866 算出的结果 (表征以它为准) */
 static uint32_t measurement_ticks;          /* 本次窗口的实际拍数 (结果行的 T=) */
-static uint8_t result_is_longw;             /* 结果是否来自 10s 长窗口 (结果行 MODE=2) */
+static uint8_t result_is_longw;             /* 结果是否来自长窗 (结果行 MODE=2) */
 static uint8_t result_is_timeout;
-static uint8_t long_tried;                  /* 本次测量已经换过 10s 窗口 */
+static uint8_t long_tried;                  /* 本次测量已经换过长窗 */
 static uint32_t precond_to_at_start;        /* 本次测量开始时的 precond_timeout 快照 */
 static uint32_t forced_window_ticks;        /* 0 = 自动; 否则每次 S 都用这个窗口长度 */
 
@@ -116,7 +118,7 @@ MeasurementProcessResult MeasurementState_Process(void)
         Current_ClearWindowFlag();
 
         /* 结果行的 T= 用**实际拍数**, 不是 Current_GetSampleCount() ——
-         * 后者是抽点后存入缓冲的点数, 10s 窗口下只有 6250, 拿它算 T= 会少报
+         * 后者是抽点后存入缓冲的点数, 长窗下只有 6250, 拿它算 T= 会少报
          * 10 倍 (这正是"注释写拍、实际是点数"那类老坑的新形态) */
         measurement_ticks = Current_GetWindowTicks();
 
@@ -129,8 +131,10 @@ MeasurementProcessResult MeasurementState_Process(void)
 
         if ((fabsf(judge) < DIRECT_MEASURE_THRESHOLD) && (long_tried == 0U))
         {
-            /* <1nA: 换 10s 窗口重测一次。
-             * **同一条测量逻辑**, 只是窗口更长 —— 公式不用改。 */
+            /* <1nA: 换长窗重测一次 (CURRENT_WIN_LONG_TICKS, 现为 50 s)。
+             * **同一条测量逻辑**, 只是窗口更长 —— 公式不用改。
+             * 1 s 判据窗照旧保留: 它的噪声 0.8 pA, 而判据是 1000 pA,
+             * 分辨绰绰有余, 花 1 s 换"该不该换长窗"是划算的。 */
             long_tried = 1U;
             Current_SetWindowTicks(CURRENT_WIN_LONG_TICKS);
             Current_Start();

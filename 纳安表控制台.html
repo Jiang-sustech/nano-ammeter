@@ -311,7 +311,7 @@
 </div>
 
 <footer>
-  <b>使用说明：</b>① 打开台式电源给板子供电 → ② 板载 USB-C 插到电脑 → ③ 本页用 <b>Chrome / Edge</b> 打开 → ④ 点「连接串口」选 CH340 (COM 口) → ⑤ 点「单次测量」：一次点击 = 一次完整测量（1 秒窗口，<1nA 自动接 10 秒双斜率），测完自动停住显示结果；或点 <b>「一键采集」</b> 自动跑完 <b>E→S→B→X→E</b> 五步并画图。<br>
+  <b>使用说明：</b>① 打开台式电源给板子供电 → ② 板载 USB-C 插到电脑 → ③ 本页用 <b>Chrome / Edge</b> 打开 → ④ 点「连接串口」选 CH340 (COM 口) → ⑤ 点「单次测量」：一次点击 = 一次完整测量（先跑 1 秒判据窗，<b>|I| &lt; 1 nA 时自动接 50 秒长窗</b>），测完自动停住显示结果 —— <b>低电流下一次要等约 51 秒</b>，进度看日志里的 <code>LONGW START</code> 那一行；或点 <b>「一键采集」</b> 自动跑完 <b>E→S→B→X→E</b> 五步并画图。<br>
   <b>注意：</b>烧录固件用 ST-Link；本页只负责控制与数据回传（115200 8N1）。<b>一键采集每步独立超时，失败只重发当前那条指令</b> —— 波形传输出错时重发 B/X 即可（数据还在 MCU 的 RAM 里），<b>不会重发 S</b>，以免白测一次还冲掉已有窗口。测量期间 S 与手动发送自动禁用（结果上报后自动恢复）；板子忙时收到的指令会被丢弃并回 BUSY（本页按钮同步变灰），不会排队执行。若页面在板子测量中途打开，连接后的自动 D 查询会收到 BUSY，按钮自动变灰直到测量结束。快捷键 S 与按钮等效（输入框聚焦时除外）。
 </footer>
 
@@ -320,11 +320,18 @@ const CH340_FILTER = [{ usbVendorId: 0x1A86, usbProductId: 0x7523 }];
 const WCH_FILTER   = [{ usbVendorId: 0x1A86 }];   /* 任意沁恒 WCH 串口芯片 (兼容 CH340 变种) */
 /* ⚠️ 波特率必须与**所连固件**一致, 不一致时的症状是"连上了但一条数据都不来"
  *    (Web Serial 用错波特率不会报错), 极易误判成板子坏了。
- *      本页 115200  <->  中间测试/nano_ammeter/            (竞赛交付固件, 未改)
- *    physics_exp_test/ 已于 2026-09-16 提到 **2 Mbps**
- *    (physics_exp_test/Core/Src/uart.c 的 BOARD_BAUD)。
- *    若要用本页控制 physics_exp_test 那块板子, 把下面改成 2000000。
- *    Python 侧 (tools/) 已自动在两个波特率间回退, 不依赖这里。 */
+ *
+ *    **两个工程现在都是 115200, 这里不用改。**
+ *      nano_ammeter/Core/Src/uart.c:10              115200
+ *      physics_exp_test/Core/Src/uart.c:40          115200 (BOARD_BAUD)
+ *
+ *    physics_exp_test 曾在 2026-09-16 提到 2 Mbps, **当天就改回来了** ——
+ *    实测那是板载 CH340G 的带宽上限, 丢字节丢在 CH340 -> USB -> 主机这一段:
+ *        115200   1.085 s/整窗  全清
+ *        921600   0.147 s       89% 一次成功, 重传后 0 丢失
+ *        2000000  0.073 s       1/16 成功, 连 4 次重传全失败 -> 不可用
+ *    失败率随波特率单调上升, 与接地无关。完整记录见 uart.c 的 BOARD_BAUD 注释。
+ *    **所以别再把它改成 2000000** —— 那会正好制造本段警告的那个故障。 */
 const BAUD = { baudRate: 115200, dataBits: 8, stopBits: 1, parity: 'none' };
 
 /* 滞回阈值 (码域, 与固件一致): 0.131V 和 2.969V -> 3.3V/65536 */
@@ -429,14 +436,17 @@ function setStatus(raw) {
   /* D 查询结果行必须最先判 (RESULT I=... 会被下方通用 I= 正则截获);
    * D 只在空闲态被固件消费, 收到 RESULT 响应即证明固件已回空闲 */
   if (raw.startsWith('RESULT')) {
-    const rm = raw.match(/I=([+-][0-9]+\.[0-9]+) nA MODE=(\d)/);
+    const rm = RESULT_RE.exec(raw);
     if (rm) { el.textContent = `${rm[1]} nA（模式${rm[2]}）`; el.className = 'run'; }
     else if (raw.includes('NONE')) { el.textContent = '暂无结果'; el.className = 'idle'; }
     setBusy(false);
     return;
   }
-  /* 结果行: 每次 S 只有一条 (measurement_state.c: 出结果即回 IDLE) */
-  const m = raw.match(/I=([+-][0-9]+\.[0-9]+) nA MODE=(\d)/);
+  /* 结果行: 每次 S 只有一条 (measurement_state.c: 出结果即回 IDLE)
+   * ⚠️ 用共用的 RESULT_RE, **别再写内联正则** —— 2026-09-17 就是因为这里
+   *    写了一份"nA 后紧跟 MODE="的简化版, 匹配不上 physics_exp_test 的
+   *    X= 字段, 结果行认不出来、按钮不恢复。 */
+  const m = RESULT_RE.exec(raw);
   if (m) {
     lastResultLine = raw;               /* 导出文件名要用它 */
     el.textContent = `${m[1]} nA`;
@@ -544,10 +554,17 @@ function onWaveComplete(wm) {
 
 var TICK_US = 160;   /* 波形采样间隔 160µs/点, 与固件 WAVE/WAVEX 同窗口 */
 
-/* 固件结果行: "I=+25.274 nA MODE=1" / "I=-0.847 nA MODE=2" / "... MODE=2 TIMEOUT"
- * 与 tools/nanoammeter_capture.py 的 RESULT_RE 保持一致; 不锚定行首,
- * 这样 D 查询回的 "RESULT I=..." 前缀行也能取到数值 */
-var RESULT_RE = /I=([+-][0-9]+\.[0-9]+) nA MODE=([0-9])( TIMEOUT)?/;
+/* 固件结果行。**必须容下 physics_exp_test 多出来的 X= 字段** —— 那一版在
+ * I= 与 MODE= 之间插了一段 " X=+24.776 nA":
+ *     nano_ammeter/       I=+25.274 nA MODE=1
+ *     physics_exp_test/   I=+24.776 nA X=+24.776 nA MODE=1 T=1000ms TIMEOUT RAW m=…
+ * 2026-09-17 实测: 少写这个可选项, **两代行里只有旧的一代能匹配** ——
+ * 症状是控制台收到了结果、日志也照打, 但 setStatus() 认不出来,
+ * setBusy(false) 永不执行, **按钮一直是灰的, 看起来像"测完不恢复"**。
+ * 与 tools/nanoammeter_capture.py 的 RESULT_RE 保持同一个结构; 不锚定行首,
+ * 这样 D 查询回的 "RESULT I=..." 前缀行也能取到数值。
+ * 捕获组: 1=I 值  2=MODE  3=TIMEOUT(可选) */
+var RESULT_RE = /I=([+-][0-9]+\.[0-9]+) nA(?: X=[+-][0-9]+\.[0-9]+ nA)? MODE=([0-9])(?: T=[0-9]+ms)?( TIMEOUT)?/;
 
 /**
  * 结果行 -> 文件名主干 (不含扩展名), 例: raw_09_12_+25.274nA
@@ -1021,7 +1038,11 @@ function calWrite() {
 const SEQ_RETRY = 2;                  /* 每步最多重发次数 */
 const SEQ_STEPS = [
   { cmd: 'E', line: 'EXT ',  tag: null,    timeout: 6000,  label: '观测通路自检' },
-  { cmd: 'S', line: 'I=',    tag: null,    timeout: 25000, label: '单次测量' },
+  /* ⚠️ S 的超时**必须覆盖固件的最长窗口**。physics_exp_test 的自动路径在
+   *    |I| < 1 nA 时会先跑 1 s 判据窗、再跑长窗, 一次 S 最坏 = 1 + 50 秒。
+   *    长窗 2026-09-17 由 10 s 改成 50 s (current.h 的 CURRENT_WIN_LONG_TICKS),
+   *    所以这里从 25000 提到 60000。**改固件那个常数时要一起来看这里。** */
+  { cmd: 'S', line: 'I=',    tag: null,    timeout: 60000, label: '单次测量' },
   { cmd: 'B', line: null,    tag: 'WAVE',  timeout: 20000, label: '内置 ADC 波形' },
   { cmd: 'X', line: null,    tag: 'WAVEX', timeout: 20000, label: 'ADS8866 波形' },
   { cmd: 'E', line: 'EXT ',  tag: null,    timeout: 6000,  label: '复检观测通路' },
