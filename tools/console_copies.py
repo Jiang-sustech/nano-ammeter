@@ -13,7 +13,7 @@ import os
 import re
 
 CANDIDATES = [
-    r"C:\Users\40512\STM32Toolchain\nanoammeter_repo\纳安表控制台.html",
+    r"C:\Users\40512\STM32Toolchain\nanoammeter_repo\console.html",
     r"C:\Users\40512\Desktop\物理实验竞赛相关\07_上位机软件\纳安表控制台.html",
     r"C:\Users\40512\STM32Toolchain\nano-ammeter-release\纳安表控制台.html",
     r"C:\Users\40512\STM32Toolchain\backup\nano_v2_2026-09-03\纳安表控制台.html",
@@ -28,7 +28,7 @@ def probe(path):
     return dict(
         mtime=datetime.datetime.fromtimestamp(os.path.getmtime(path)),
         size=len(s),
-        has_x=("X=[+-][0-9]+" in s),          # 结果行正则是否容下 physics_exp_test 的 X= 段
+        has_x=("X=[+-][0-9]+" in s),          # 结果行正则是否容下 firmware 的 X= 段
         s_timeout=(m.group(1) if m else "?"),
         footer_50=("50 秒长窗" in s),
     )

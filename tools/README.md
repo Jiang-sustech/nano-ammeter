@@ -46,7 +46,7 @@ from cal_sweep import ...
 | `sweep_pulse.py` | 脉冲实验采集（TSP 脉冲源模式）|
 | `cal_sweep.py` | 标定扫描（CLI）；也是所有人的底层库 |
 | `warm_test.py` | 预热必要性对照实验（always / never / first）|
-| `nanoammeter_capture.py` | 单次采集 → `raw_<日期>_<值>nA.npz/.png/.log`。⚠️ 对 `physics_exp_test` 要加 `--no-noise`（该固件已删底噪指令）|
+| `nanoammeter_capture.py` | 单次采集 → `raw_<日期>_<值>nA.npz/.png/.log`。⚠️ 对 `firmware` 要加 `--no-noise`（该固件已删底噪指令）|
 | `pulse_real.py` | 真实脉冲波形重建（PC 翻转 / 仪器脉冲），含整窗原始码反推 |
 | `test_smu.py` | 源表连通与功能自检 |
 
@@ -122,7 +122,7 @@ python tools/console_figure.py --light    # 浅色版（白底论文用）
 
 | 脚本 | 用途 |
 |---|---|
-| `console_copies.py` | 列出全盘所有「纳安表控制台.html」副本及各自版本。**改了控制台却没生效时先跑这个** |
+| `console_copies.py` | 列出全盘所有「console.html」副本及各自版本。**改了控制台却没生效时先跑这个** |
 | `boot0_probe.py` / `uart_flash.py` | 串口 bootloader 烧录路径（独立于 ST-Link）。⚠️ 固定 115200 8E1，**不要改** |
 | `test_capture.py` | `nanoammeter_capture.py` 的离线回归测试 |
 | `measure_transient.py` | 量 `EN=0` 断开瞬间注入的电荷 → 寄生电容 C_p |

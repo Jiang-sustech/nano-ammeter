@@ -1,9 +1,9 @@
 /**
  * 纳安表控制台 HTML 自测脚本 (Node.js, 无浏览器依赖)
  *
- * 用法:  node 纳安表控制台_自测.js
+ * 用法:  node console_selftest.js
  *
- * 原理: 从 纳安表控制台.html 提取 <script> 内联代码, 在 DOM / Web Serial
+ * 原理: 从 console.html 提取 <script> 内联代码, 在 DOM / Web Serial
  *       桩环境里执行, 然后模拟固件字节流 (与 main.c 协议一致, 含任意
  *       分包、WAVE 头截断、头与二进制同包、背靠背两波、波中断线等),
  *       断言解析结果。固件协议依据: OLED_SH1106/Core/Src/main.c uart.c current.c
@@ -14,7 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const assert = require('assert').strict;
 
-const HTML_FILE = path.join(__dirname, '纳安表控制台.html');
+const HTML_FILE = path.join(__dirname, 'console.html');
 const html = fs.readFileSync(HTML_FILE, 'utf8');
 const m = html.match(/<script>([\s\S]*?)<\/script>/);
 if (!m) { console.error('未在 HTML 中找到 <script> 块'); process.exit(2); }
@@ -196,8 +196,8 @@ function testSetStatus() {
     ['RESULT NONE', '暂无结果', 'idle'],
     /* D 查询成功行: 必须带 (模式n), 否则被通用 I= 正则截获 */
     ['RESULT I=+0.500 nA MODE=2', '+0.500 nA（模式2）', 'run'],
-    /* ⚠️ physics_exp_test 格式: I= 与 MODE= 之间多一段 " X=… nA"。
-     * 2026-09-17 现场回归 —— 少了这几条, 控制台只认 nano_ammeter 的旧格式。 */
+    /* ⚠️ firmware 格式: I= 与 MODE= 之间多一段 " X=… nA"。
+     * 2026-09-17 现场回归 —— 少了这几条, 控制台只认 firmware-v1 的旧格式。 */
     ['I=+24.776 nA X=+24.776 nA MODE=1 T=1000ms', '+24.776 nA', 'run'],
     ['I=+24.776 nA X=+24.776 nA MODE=1 T=1000ms TIMEOUT'
      + ' RAW m=1557 n=4693 INT1=65535 INT2=53513 EXT1=65535 EXT2=65535',
@@ -901,7 +901,7 @@ function testCalConvert() {
   assert.strictEqual(d.fA, 0);
 }
 
-/* T39: physics_exp_test 结果行 -> 按钮必须恢复
+/* T39: firmware 结果行 -> 按钮必须恢复
  *
  * 2026-09-17 现场回归。固件发的是
  *     I=+24.776 nA X=+24.776 nA MODE=1 T=1000ms TIMEOUT RAW m=…
@@ -910,7 +910,7 @@ function testCalConvert() {
  * 数值照显示(显示是原样回显), 但 setBusy(false) 永不执行, **按钮一直灰着**,
  * 表现为"测完一组不会恢复, 没法开始下一次"。
  *
- * 这个 bug 能活到现场, 是因为自测**只喂过 nano_ammeter 的旧格式**
+ * 这个 bug 能活到现场, 是因为自测**只喂过 firmware-v1 的旧格式**
  * (见 T1 与 T2 里的 'I=+12.345 nA MODE=1'), 36 项全过而问题照样在。
  */
 async function testPhysexpResultRecovers() {
@@ -925,7 +925,7 @@ async function testPhysexpResultRecovers() {
     + ' RAW m=1557 n=4693 INT1=65535 INT2=53513 EXT1=65535 EXT2=53513\r\n'));
   await tick(60);
   assert.strictEqual(els['btnStart'].disabled, false,
-                     'physics_exp_test 结果行后按钮必须恢复');
+                     'firmware 结果行后按钮必须恢复');
   assert.strictEqual(els['screenState'].textContent, '+24.776 nA', '应认出结果值');
 }
 
@@ -1010,7 +1010,7 @@ async function testExpAcquireFlow() {
     ['T36 系数行解析', testCalParse],
     ['T37 a/b 换算 ppm/fA', testCalConvert],
     ['T38 逐点采集流程', testExpAcquireFlow],
-    ['T39 physics_exp_test 结果行 按钮恢复', testPhysexpResultRecovers],
+    ['T39 firmware 结果行 按钮恢复', testPhysexpResultRecovers],
   ];
   let passed = 0, failed = 0;
   for (const [name, fn] of tests) {

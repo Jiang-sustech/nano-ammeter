@@ -131,7 +131,7 @@ uint16_t Current_GetLastCodeExt(void);   /* 窗口最后一拍 (外部路) */
  * ⚠️ **改这个常数必须同时改上位机的等待上限** —— 一次 S 最坏是
  *    "1 s 判据窗 + 长窗" = 51 s。跟不上就会重现 2026-09-16 那次
  *    "预热: 无响应" 的假故障 (默认 40 s vs 50 s 窗, 每次都超时)。
- *    要同步的地方: `纳安表控制台.html` 的 S 步超时、`tools/cal_sweep.py` 的
+ *    要同步的地方: `console.html` 的 S 步超时、`tools/cal_sweep.py` 的
  *    board_measure/board_warmup 默认、`tools/nanoammeter_capture.py` 的结果行等待、
  *    `tools/sweep_dense.py` 与 `warm_test.py` 里按窗口折算超时的那两处。 */
 #define CURRENT_WIN_SHORT_TICKS   6250U     /* 1 s  —— |I| >= 1 nA */

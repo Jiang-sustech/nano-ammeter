@@ -25,7 +25,7 @@ import sys
 import numpy as np
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC_HTML = os.path.join(REPO, '纳安表控制台.html')
+SRC_HTML = os.path.join(REPO, 'console.html')
 SRC_NPZ = os.path.join(REPO, 'data', 'raw_09_13_+10.101nA.npz')
 
 CODE_LOWER = round(0.131 / 3.3 * 65536)

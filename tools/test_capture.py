@@ -6,7 +6,7 @@ nanoammeter_capture.py 回归测试 (纯离线, 不碰串口)
 
 覆盖三处曾经/容易出错的地方:
 
-1. RESULT_RE —— 结果行的两代格式。physics_exp_test 在 I= 和 MODE= 之间插了
+1. RESULT_RE —— 结果行的两代格式。firmware 在 I= 和 MODE= 之间插了
    `X=<外部> nA`, 用 `nA MODE=` 直接匹配会落空, 于是 capture_name 把文件名
    退化成 raw_09_12_NO_RESULT.npz、result_na 变 NaN —— **静默**丢数据。
 2. 参数解析 —— `--no-noise` 是开关, 不能顶掉 PORT 的位置参数。
@@ -47,7 +47,7 @@ mod = load([])
 
 RESULT_CASES = [
     # (行, I, X, MODE, T, TIMEOUT)
-    # physics_exp_test (新格式)
+    # firmware (新格式)
     ("I=+25.274 nA X=+25.271 nA MODE=1 T=1000ms CAL=+25.270",
      "+25.274", "+25.271", "1", "1000", False),
     ("I=+40.228 nA X=+40.231 nA MODE=1 T=1000ms",
@@ -58,13 +58,13 @@ RESULT_CASES = [
      "-0.012", "-0.013", "2", "3000", False),
     ("I=+99.999 nA X=+99.998 nA MODE=1 T=412ms TIMEOUT",  # 撞轨提前收尾
      "+99.999", "+99.998", "1", "412", True),
-    # nano_ammeter (老格式, 无 X= / T=)
+    # firmware-v1 (老格式, 无 X= / T=)
     ("I=+25.274 nA MODE=1", "+25.274", None, "1", None, False),
     ("I=-0.847 nA MODE=2", "-0.847", None, "2", None, False),
     ("I=+1.234 nA MODE=2 TIMEOUT", "+1.234", None, "2", None, True),
     # D 查询回的 RESULT 前缀行 (search 不锚行首)
     ("RESULT I=+25.274 nA MODE=1", "+25.274", None, "1", None, False),
-    # 带 RAW 段 (physics_exp_test MODE=1) —— 追加字段不能破坏前面的解析
+    # 带 RAW 段 (firmware MODE=1) —— 追加字段不能破坏前面的解析
     ("I=+40.228 nA X=+40.231 nA MODE=1 T=1000ms CAL=+40.235 "
      "RAW m=5003 n=6251 INT1=58962 INT2=2601 EXT1=58900 EXT2=2540",
      "+40.228", "+40.231", "1", "1000", False),

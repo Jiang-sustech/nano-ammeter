@@ -59,9 +59,9 @@ $m$ / $n$ 为 `SEL_POS` / `SEL_NEG` 两相的驻留拍数，$T_{\text{int}}=160\
   ±50 nA 参考源；OPA735 电平移位把 ±4.5 V 映射进 ADC 量程
 - **采集** — 双路同拍并行：内置 12-bit ADC 做控制判决，外部 ADS8866（真 16 位）
   做观测与标定。每窗 6250 点
-- **固件** — [`nano_ammeter/`](nano_ammeter/)（竞赛交付版）与
-  [`physics_exp_test/`](physics_exp_test/)（实验表征版：分段校准、参数掉电保存等）
-- **上位机** — [`纳安表控制台.html`](纳安表控制台.html)，单文件、无外部依赖、
+- **固件** — [`firmware-v1/`](firmware-v1/)（竞赛交付版）与
+  [`firmware/`](firmware/)（实验表征版：分段校准、参数掉电保存等）
+- **上位机** — [`console.html`](console.html)，单文件、无外部依赖、
   Chrome/Edge 双击即用
 - **硬件文件** — [`hardware/`](hardware/)：原理图 + 4 层 Gerber
 
@@ -82,13 +82,13 @@ $m$ / $n$ 为 `SEL_POS` / `SEL_NEG` 两相的驻留拍数，$T_{\text{int}}=160\
 
 ```bash
 # 1. 打开网页控制台（无需安装任何软件）
-#    Chrome / Edge 打开 纳安表控制台.html → 「连接串口」选 CH340 → 「单次测量」
+#    Chrome / Edge 打开 console.html → 「连接串口」选 CH340 → 「单次测量」
 
 # 2. 命令行采集（Python 侧，接 2636B 源表做标定/表征）
 python tools/nanoammeter_capture.py COM8 --no-noise     # 单次采集 ~15 s
 
 # 3. 构建固件（CMake + arm-none-eabi）
-cd physics_exp_test && cmake --build build/Debug
+cd firmware && cmake --build build/Debug
 ```
 
 完整说明见下文各节；脚本索引见 [`tools/README.md`](tools/README.md)。
@@ -98,13 +98,13 @@ cd physics_exp_test && cmake --build build/Debug
 | 目录 | 说明 |
 |---|---|
 | [`hardware/`](hardware/) | 原理图 + Gerber 制板文件（4 层板）|
-| [`nano_ammeter/`](nano_ammeter/) | 竞赛交付固件 |
-| [`physics_exp_test/`](physics_exp_test/) | 实验表征固件 |
+| [`firmware-v1/`](firmware-v1/) | 竞赛交付固件 |
+| [`firmware/`](firmware/) | 实验表征固件 |
 | [`tools/`](tools/) | 采集与分析脚本（[索引](tools/README.md)）|
 | [`docs/`](docs/) | 排障记录、实验方案、测量流程 |
 | [`data/`](data/) | 实测数据（标定网格、低电流段、脉冲）|
 | [`image_paper/`](image_paper/) | 论文插图 |
-| [`纳安表控制台.html`](纳安表控制台.html) | 网页控制台 |
+| [`console.html`](console.html) | 网页控制台 |
 
 ## 许可
 
@@ -119,10 +119,10 @@ cd physics_exp_test && cmake --build build/Debug
 
 | 目录 | 说明 |
 |------|------|
-| `nano_ammeter/` | **竞赛交付固件**：测量状态机 + OLED 显示 + 串口协议/波形回传 + 双斜率硬积分 + 编译期标定固件 |
-| `physics_exp_test/` | **实验表征固件** —— `nano_ammeter/` 的整份拷贝 + 四项表征功能（小电流模式、分段校准系数、串口读写、掉电保存）。**两个工程源码独立、会漂移**，成对关系与防漂移约定见该目录的 [README](physics_exp_test/README.md) |
-| `纳安表控制台.html` | 网页控制台（Web Serial API，Chrome/Edge 打开即可用）。**「一键采集」** 自动跑 `E→S→B→X→E`，每步独立超时、失败只重发该步；**「实验表征」面板** 负责逐点采集与校准系数收发（只对 physics_exp_test 固件有效） |
-| `纳安表控制台_自测.js` | 控制台自测：从 HTML 提取内联脚本，在 DOM/串口桩里跑 36 项测试 |
+| `firmware-v1/` | **竞赛交付固件**：测量状态机 + OLED 显示 + 串口协议/波形回传 + 双斜率硬积分 + 编译期标定固件 |
+| `firmware/` | **实验表征固件** —— `firmware-v1/` 的整份拷贝 + 四项表征功能（小电流模式、分段校准系数、串口读写、掉电保存）。**两个工程源码独立、会漂移**，成对关系与防漂移约定见该目录的 [README](firmware/README.md) |
+| `console.html` | 网页控制台（Web Serial API，Chrome/Edge 打开即可用）。**「一键采集」** 自动跑 `E→S→B→X→E`，每步独立超时、失败只重发该步；**「实验表征」面板** 负责逐点采集与校准系数收发（只对 firmware 固件有效） |
+| `console_selftest.js` | 控制台自测：从 HTML 提取内联脚本，在 DOM/串口桩里跑 36 项测试 |
 | `console_src/` | 纯函数模块源文件（数据存档与命名），见下 |
 | `docs/` | **排障记录**：[调试与排障.md](docs/调试与排障.md) |
 | `tools/` | `nanoammeter_capture.py` 采集脚本 + `test_capture.py` 其离线回归测试 + `fit_constants.m` 物理常数最小二乘拟合 + `uart_flash.py` 串口烧录器 + SWD 调试 TCL 脚本 |
@@ -137,9 +137,9 @@ python tools/nanoammeter_capture.py COM7 --no-noise   # 跳过底噪 N/W (~15 s)
 python tools/nanoammeter_capture.py --replot [FILE]   # 不接板子，重画已有的 npz
 ```
 
-**`--no-noise` 是给 `physics_exp_test` 用的。** 该工程已删除底噪指令（见其 README「两个工程的分工」），不加这个开关脚本会在第 7 步干等 90 秒后抛 `TimeoutError`，而 `np.savez` 在那之后 —— **一个文件都写不出来**。
+**`--no-noise` 是给 `firmware` 用的。** 该工程已删除底噪指令（见其 README「两个工程的分工」），不加这个开关脚本会在第 7 步干等 90 秒后抛 `TimeoutError`，而 `np.savez` 在那之后 —— **一个文件都写不出来**。
 
-脚本认得两代结果行：`nano_ammeter` 的 `I=… nA MODE=n`，和 `physics_exp_test` 的 `I=… X=… MODE=n T=…ms [CAL=…]`。后者在 `I=` 与 `MODE=` 之间插了 `X=` 字段，解析正则必须留出那一段，否则文件名会静默退化成 `raw_MM_DD_NO_RESULT.npz`。这条有回归测试兜着：
+脚本认得两代结果行：`firmware-v1` 的 `I=… nA MODE=n`，和 `firmware` 的 `I=… X=… MODE=n T=…ms [CAL=…]`。后者在 `I=` 与 `MODE=` 之间插了 `X=` 字段，解析正则必须留出那一段，否则文件名会静默退化成 `raw_MM_DD_NO_RESULT.npz`。这条有回归测试兜着：
 
 ```bash
 python tools/test_capture.py     # 26 项，纯离线，不碰串口
@@ -170,7 +170,7 @@ MATLAB / Origin 做 —— 那些工具本来就干这个，而且比手写实�
 
 ### console_src/ 与「内联」约定
 
-`纳安表控制台.html` 必须保持**单文件、可双击打开**，所以
+`console.html` 必须保持**单文件、可双击打开**，所以
 `console_src/archive.js`（导出与命名）的代码是**内联**进 HTML 的：
 
 | 源文件 | 内容 | 自带测试 |
@@ -184,15 +184,15 @@ Node 下可 `require`，内联进浏览器时不会因 `module` 未定义而报�
 改完跑：
 ```
 node console_src/archive_test.js    # 模块自身
-node 纳安表控制台_自测.js            # 内联后的整体（25 项）
+node console_selftest.js            # 内联后的整体（25 项）
 ```
-| `中间测试/` | 历史固件归档，**只读不再开发**：见下表 |
+| `prototypes/` | 历史固件归档，**只读不再开发**：见下表 |
 
-### 中间测试/（历史归档）
+### prototypes/（历史归档）
 
 | 目录 | 说明 |
 |------|------|
-| `OLED_SH1106/` | 合并版固件前身：测量状态机 + 屏幕显示 + 串口控制/数据回传，硬件验证通过。`nano_ammeter/` 的直接祖先，文件列表一致 |
+| `OLED_SH1106/` | 合并版固件前身：测量状态机 + 屏幕显示 + 串口控制/数据回传，硬件验证通过。`firmware-v1/` 的直接祖先，文件列表一致 |
 | `physics_experiment/` | 实机验证版固件：上电自动 bang-bang，积分器闭环 + 阈值 + 电平移位 + ADC 全链路跑通，实采到干净三角波；含 ADS8866 与内置 ADC 同拍并行采集 |
 | `Version1/` | 早期正式版固件（测量核心出处，旧显示驱动） |
 | `Version1.zip` | `Version1/` 的压缩副本，冗余，仅供参考 |
@@ -218,7 +218,7 @@ node 纳安表控制台_自测.js            # 内联后的整体（25 项）
   > 详见 [docs/调试与排障.md](docs/调试与排障.md)。
 - **显示**: SH1106 1.3" OLED（SPI2，SH1106-master 驱动）
 - **串口**: 板载 CH340G（USB-C），USART1 PA9/PA10，**115200 8N1**
-  （波特率定义在 `physics_exp_test/Core/Src/uart.c` 的 `BOARD_BAUD`，**两个固件都是 115200**）
+  （波特率定义在 `firmware/Core/Src/uart.c` 的 `BOARD_BAUD`，**两个固件都是 115200**）
 
   > 2026-09-16 试过提到 2 Mbps，**当天就改回来了**：那是板载 CH340G 的带宽上限，
   > 丢字节丢在 CH340 → USB → 主机这一段，重传也补不回来。
@@ -254,9 +254,9 @@ node 纳安表控制台_自测.js            # 内联后的整体（25 项）
    > **待测电流必须在整个拉回相期间就接好** —— 拉回本身受它影响（净电流 =
    > I_ref − I_x，决定拉回多快），中途接入会让起点不可预期。
 
-### 两个固件在模式一上的差别（`nano_ammeter` / `physics_exp_test`）
+### 两个固件在模式一上的差别（`firmware-v1` / `firmware`）
 
-| | `nano_ammeter`（交付固件） | `physics_exp_test`（表征固件） |
+| | `firmware-v1`（交付固件） | `firmware`（表征固件） |
 |---|---|---|
 | 拉回相 | 主循环里**阻塞**执行 | 搬进 **TIM6 中断** |
 | 窗口 | 6249 个间隔 = **0.99984 s** | 6250 个间隔 = **1.000 s 整** |
@@ -267,7 +267,7 @@ node 纳安表控制台_自测.js            # 内联后的整体（25 项）
 让"拉回最后一拍"直接当窗口起点 `V_01` 用——只有 ISR 采样才和后面的采样点在同一套
 节拍网格上（在主循环里读的话，`V_01` 到采样点 0 的间隔会多出"读一次 ADC + 启动
 TIM6"那两截，折算约 0.5~1 pA 的恒定误差）。详见
-[physics_exp_test/README](physics_exp_test/README.md)。
+[firmware/README](firmware/README.md)。
 
 ## 串口协议（115200 8N1）
 
@@ -286,7 +286,7 @@ TIM6"那两截，折算约 0.5~1 pA 的恒定误差）。详见
 "<tag> <count>\r\n"  +  count×2 字节小端 u16  +  2 字节校验和（样本和）
 ```
 
-### 实验表征固件（`physics_exp_test`）额外的字段与指令
+### 实验表征固件（`firmware`）额外的字段与指令
 
 | | |
 |---|---|
@@ -297,12 +297,12 @@ TIM6"那两截，折算约 0.5~1 pA 的恒定误差）。详见
 
 **`C` 的响应格式不可追加字段**（上位机正则锚定行尾），所以物理常数走单独的 `Q`。
 两者都存 Flash 最后一页，掉电不丢 —— 队友重新标定只要串口发一条指令，不用重编译
-烧录。详见 [physics_exp_test/README](physics_exp_test/README.md)。
+烧录。详见 [firmware/README](firmware/README.md)。
 
 指令大小写不敏感，行结束符忽略；**测量期间指令被忽略**（结果出来后才接受下一次）。
 
-> `nano_ammeter` 里 `N`（底噪标定）与 `W`（底噪逐秒序列）命令**仍在**，但已决定删除
-> （上位机侧已移除）。`physics_exp_test` 已经删掉了。
+> `firmware-v1` 里 `N`（底噪标定）与 `W`（底噪逐秒序列）命令**仍在**，但已决定删除
+> （上位机侧已移除）。`firmware` 已经删掉了。
 > 原因见 [docs/调试与排障.md](docs/调试与排障.md)；固件侧删除待下次烧录一并做。
 
 按键功能已全部关闭（`BUTTON_DISABLED`）。注意：PB4 是否真的故障
@@ -430,7 +430,7 @@ CSV 表头 `I_true,c1,c2,m,n`：已知输入电流、窗口两端原始码、POS
 
 ### 这些常数存在哪
 
-| | `nano_ammeter`（交付固件） | `physics_exp_test`（表征固件） |
+| | `firmware-v1`（交付固件） | `firmware`（表征固件） |
 |---|---|---|
 | 物理常数 | `current.h` 的**编译期宏** | Flash 最后一页（`cal_coef.c`），串口 `Q` 指令读写 |
 | 分段系数 `a`/`b` | 无 | 同上，串口 `K` / `C` / `Z` |

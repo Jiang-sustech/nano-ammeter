@@ -1,14 +1,14 @@
-# physics_exp_test — 实验表征固件
+# firmware — 实验表征固件
 
-> ## 本工程与 `nano_ammeter/` 的关系（2026-09-13 重新厘清）
+> ## 本工程与 `firmware-v1/` 的关系（2026-09-13 重新厘清）
 
 ```
-nano_ammeter/        竞赛交付固件
-physics_exp_test/    实验表征固件（本工程）= 交付固件 + M 手动连采指令
+firmware-v1/        竞赛交付固件
+firmware/    实验表征固件（本工程）= 交付固件 + M 手动连采指令
 ```
 
 **2026-09-13 做了一次整份同步**：此前两份工程已经漂移到"`current.c` 差 1053 行、
-`nano_ammeter` 连 `cal_coef` 都没有"的地步，靠人工定点同步不可靠。现在的关系是
+`firmware-v1` 连 `cal_coef` 都没有"的地步，靠人工定点同步不可靠。现在的关系是
 **单向的**：本工程 = 交付固件 + 一块表征机械，其余**逐字节相同**。
 
 ### 现在**唯一**的差别：`M` 手动连采指令
@@ -23,8 +23,8 @@ physics_exp_test/    实验表征固件（本工程）= 交付固件 + M 手动�
 ```bash
 # 验证：差异只应出现在上面四处
 cd nanoammeter_repo
-for f in $(cd physics_exp_test && ls Core/Src/*.c Core/Inc/*.h | sed 's|Core/||'); do
-  d=$(diff <(tr -d '\r' < nano_ammeter/Core/$f) <(tr -d '\r' < physics_exp_test/Core/$f) | grep -c '^[<>]')
+for f in $(cd firmware && ls Core/Src/*.c Core/Inc/*.h | sed 's|Core/||'); do
+  d=$(diff <(tr -d '\r' < firmware-v1/Core/$f) <(tr -d '\r' < firmware/Core/$f) | grep -c '^[<>]')
   [ "$d" -gt 0 ] && printf "%-30s %4d 行\n" "$f" "$d"
 done
 ```
@@ -60,7 +60,7 @@ Core/Src/cal_coef.c  Core/Inc/cal_coef.h      <- 物理常数存储, 两边都�
 STM32L431xx_FLASH.ld                          <- 最后一页留给校准常数
 ```
 
-> **链接脚本那一页必须两边都留。** `nano_ammeter` 原来没留（它那时也没有
+> **链接脚本那一页必须两边都留。** `firmware-v1` 原来没留（它那时也没有
 > `cal_coef.c`），同步进 `cal_coef` 之后必须补上 —— 否则代码长到 `0x0803F800`
 > 那一页上，`Cal_Save()` 一写就把自己的代码擦了。
 
@@ -68,15 +68,15 @@ STM32L431xx_FLASH.ld                          <- 最后一页留给校准常数
 cd nanoammeter_repo
 for f in Core/Src/cal_coef.c Core/Inc/cal_coef.h STM32L431xx_FLASH.ld \
          Core/Src/adc.c Core/Src/ads8866.c Core/Inc/ads8866.h Core/Src/sh1106.c; do
-  diff -q physics_exp_test/$f nano_ammeter/$f && echo "一致 $f"
+  diff -q firmware/$f firmware-v1/$f && echo "一致 $f"
 done
-diff -rq physics_exp_test/Drivers nano_ammeter/Drivers
+diff -rq firmware/Drivers firmware-v1/Drivers
 ```
 
 ### 修改流程
 
-1. **在 `physics_exp_test` 里改**（它是超集），验证
-2. 改动**与 `M` 指令无关**的，**同步回 `nano_ammeter`**
+1. **在 `firmware` 里改**（它是超集），验证
+2. 改动**与 `M` 指令无关**的，**同步回 `firmware-v1`**
 3. 同步后按上面的脚本核一遍差异 —— 应当只出现在那四行
 
 > **判断标准**：差异必须只有 `M` 指令那四处。多出来的就是漏同步。
@@ -85,18 +85,18 @@ diff -rq physics_exp_test/Drivers nano_ammeter/Drivers
 
 ```bash
 cmake --preset Debug
-cmake --build build/Debug          # 产出 physics_exp_test.elf
+cmake --build build/Debug          # 产出 firmware.elf
 ```
 
 ## 与上位机的关系
 
-两个固件**共用同一个控制台** `../纳安表控制台.html`。
+两个固件**共用同一个控制台** `../console.html`。
 控制台里的「实验表征」面板只在与本固件通信时有用；
-对着 `nano_ammeter` 用时该面板不会响应（系数查询无回包）。
+对着 `firmware-v1` 用时该面板不会响应（系数查询无回包）。
 
 ## 扩展协议（仅本固件有）
 
-在 `nano_ammeter` 原有协议（`S`/`D`/`B`/`X`/`E`）之上增加以下指令。
+在 `firmware-v1` 原有协议（`S`/`D`/`B`/`X`/`E`）之上增加以下指令。
 
 ### 为什么要用整数传系数
 
@@ -140,7 +140,7 @@ I=+25.274 nA X=+25.271 nA MODE=1 T=1000ms CAL=+25.270 RAW m=5003 n=6251 INT1=589
 | `X=` | 由 **ADS8866** 算出的原始值 ← **拟合用的就是这个** |
 | `T=` | 实际积分时长（ms）。模式一恒为 1000ms；小电流模式是设定值，撞轨提前收尾时更短 —— 报告里 `I = C·ΔV/T` 的 T 就是它，**必须记录** |
 | `CAL=` | `X=` 经分段校准模型后的最终输出（未校准时不出这个字段） |
-| ` TIMEOUT` | 后缀。本固件已无模式二，正常不会出现；保留解析是为了兼容 `nano_ammeter` |
+| ` TIMEOUT` | 后缀。本固件已无模式二，正常不会出现；保留解析是为了兼容 `firmware-v1` |
 | `RAW …` | **模式一专属**的原始量，见下 |
 
 > 上位机的 `I=` 解析正则不锚定行尾，追加字段不会破坏现有解析。

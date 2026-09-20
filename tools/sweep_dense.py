@@ -236,7 +236,7 @@ def main():
         """该点实际窗口长 (s) —— 强制的按强制算, 其余的按固件自动规则推。
 
         ⚠️ 这里的 50.0 是**固件自动长窗**的长度, 必须与
-        physics_exp_test/Core/Inc/current.h 的 CURRENT_WIN_LONG_TICKS 一致
+        firmware/Core/Inc/current.h 的 CURRENT_WIN_LONG_TICKS 一致
         (2026-09-17 由 10 s 改成 50 s)。它喂给 m_timeout = wtot + 30,
         算小了就会在低电流点上误报 TIMEOUT。
         """

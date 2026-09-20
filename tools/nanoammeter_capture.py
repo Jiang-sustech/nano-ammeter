@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-nano_ammeter: full UART data return + plot
+firmware-v1: full UART data return + plot
 
 Sequence (one shot):
     E                -> observation-path health line
@@ -21,7 +21,7 @@ Usage: python nanoammeter_capture.py [PORT] [--no-noise] [--true=<nA>]
         文件名去对, 很容易错位。注意必须写成等号形式: `--true=-40` (写成
         `--true -40` 的话那个 -40 会被位置解析当成端口名)。
 
---no-noise: 跳过 N/W 两步。physics_exp_test 已删除底噪指令 (见该工程
+--no-noise: 跳过 N/W 两步。firmware 已删除底噪指令 (见该工程
 README「两个工程的分工」), 对着它跑不加这个开关会在第 7 步干等 90 秒后抛
 TimeoutError —— 而 np.savez 在那之后, 结果是一个文件都写不出来。
 """
@@ -70,14 +70,14 @@ PORT = _rest[0] if _rest else "COM7"
 # 固件说过的每一行 ASCII, 原样留档 (以前只存三个数组, 结果行/健康行全丢了)
 TRANSCRIPT = []
 
-# 两代结果行的并集。nano_ammeter:  "I=+25.274 nA MODE=1"
-#                      physics_exp_test: "I=<内置> X=<外部> MODE=1 T=1000ms [CAL=..]
+# 两代结果行的并集。firmware-v1:  "I=+25.274 nA MODE=1"
+#                      firmware: "I=<内置> X=<外部> MODE=1 T=1000ms [CAL=..]
 #                                         [RAW m=.. n=.. INT1=.. INT2=.. EXT1=.. EXT2=..]"
 # X= / T= / RAW 都是可选 —— 用 `nA MODE=` 直接匹配会在第二行格式上落空 (中间隔着
 # X=), 于是 capture_name 退化成 NO_RESULT、result_na 变 NaN, 所以必须留出那一段。
 #
 # RAW 段是模式一的原始量 (POS/NEG 周期数 + 窗口首尾两路原始码), 只有
-# physics_exp_test 的 MODE=1 会出。存进 npz 是为了让 (m+n) 与 (m+n-1) 两种
+# firmware 的 MODE=1 会出。存进 npz 是为了让 (m+n) 与 (m+n-1) 两种
 # 分母之争、以及分段系数 a/b 的拟合能直接从**同一次测量**的原始量出发。
 RESULT_RE = re.compile(
     r"I=(?P<i>[+-][0-9]+\.[0-9]+) nA"
@@ -253,7 +253,7 @@ def main():
         sub = int(MANUAL)
         print("[3] M%d: 手动连采 (阻塞约 130ms)" % sub)
         ser.write(("M%d\n" % sub).encode())
-        # ⚠️ 等待上限必须覆盖固件最长窗口。physics_exp_test 的自动路径在
+        # ⚠️ 等待上限必须覆盖固件最长窗口。firmware 的自动路径在
         #    |I| < 1 nA 时先跑 1 s 判据窗再跑长窗, 一次最坏 = 1 + 长窗秒。
         #    长窗 2026-09-17 由 10 s 改成 50 s (current.h), 所以这里 30 -> 60。
         MANUAL_LINE = wait_line(ser, "MAN DONE", 60.0)

@@ -48,7 +48,7 @@ except ImportError:
 DEFAULT_POINTS = [45 - 5 * i for i in range(19)]      # 45,40,...,0,...,-45
 
 # 板子串口波特率 —— **115200, 提不上去** (2026-09-16 实测裁定)
-#   **必须与固件 physics_exp_test/Core/Src/uart.c 的 BOARD_BAUD 一致**。
+#   **必须与固件 firmware/Core/Src/uart.c 的 BOARD_BAUD 一致**。
 #
 #   实测 (整窗 12500 字节回传, 每档至少 16 次):
 #       115200  1.085 s  **全清**
@@ -66,7 +66,7 @@ SETTLE_S = 3.0          # 换点后等源稳定
 READBACK_N = 10         # 每次测量采几个回读值 (需求①要求 10)
 READBACK_DT = 0.1       # 回读轮询间隔
 
-# 单次 S 的等待上限。**必须覆盖固件的最长窗口** —— physics_exp_test 的自动路径
+# 单次 S 的等待上限。**必须覆盖固件的最长窗口** —— firmware 的自动路径
 # 在 |I| < 1 nA 时会先跑 1 s 判据窗、再跑长窗, 所以一次 S 最坏 = 1 + 长窗。
 #   2026-09-17: 长窗由 10 s 改成 50 s (current.h 的 CURRENT_WIN_LONG_TICKS),
 #               这个值跟着从 40 提到 60。
