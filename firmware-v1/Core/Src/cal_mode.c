@@ -32,6 +32,7 @@ static double mean_code, std_code, slope_code_per_s;
 /* 轮间统计 (跨轮累加, 不清零) */
 static uint32_t round_count;
 static uint32_t last_progress_sec;
+static volatile uint8_t progress_due;    /* ISR 置, 主循环清 —— 见 CalMode_Tick 的注释 */
 static double   sum_means, sumsq_means;
 static double   cum_zero_code, cum_noise_code;
 
@@ -74,7 +75,7 @@ static void CalZero_Progress(void)
     uint8_t railed = (zmax_code >= 0xFF00U || zmin_code <= 0x00FFU) ? 1U : 0U;
 
     UART_FormatScaled((int64_t)(mean_code * (3.3 / 65536.0) * 1e4), 4, v_adc);
-    sprintf(buf, "CAL ZERO t=%lu/%lus: MEAN=%lu Vadc=%sV CODE=%u..%u%s\r\n",
+    sprintf(buf, "CAL ZERO t=%lu/%us: MEAN=%lu Vadc=%sV CODE=%u..%u%s\r\n",
             (unsigned long)(tick_count / 6250U), (unsigned)CAL_ZERO_SECONDS,
             (unsigned long)(mean_code + 0.5), v_adc,
             (unsigned)zmin_code, (unsigned)zmax_code,
@@ -154,6 +155,7 @@ void CalMode_Start(void)
     zmin_code = 0xFFFFU;
     zmax_code = 0U;
     last_progress_sec = 0U;
+    progress_due = 0U;
 
     if (round_count == 0U)          /* 只在本轮序列的最开头清零一次 */
     {
@@ -176,7 +178,8 @@ void CalMode_Start(void)
 void CalMode_Tick(void)
 {
 #if CAL_MODE == CAL_ZERO
-    uint16_t raw = Adc_ReadRaw();       /* 控制通路; 零位检查不加观测扰动 */
+    /* 走 Current_ReadControl(): 随 USE_INTERNAL_ADC 一起切, 不写死内置路 */
+    uint16_t raw = Current_ReadControl();
     double t = (double)tick_count / 6250.0;      /* 秒 */
 
     sum_t  += t;
@@ -188,20 +191,28 @@ void CalMode_Tick(void)
     if (raw > zmax_code) { zmax_code = raw; }
     tick_count++;
 
-    /* 每 10 秒报一次进度 */
+    /* 每 10 秒报一次进度 —— **只置标志, 计算与打印都不在中断里做**。
+     *
+     * 原来这里直接调 CalZero_Compute() + CalZero_Progress():
+     *   CalZero_Progress() 里有 sprintf 和 HAL_UART_Transmit, 而后者靠
+     *   HAL_GetTick 判超时 —— TIM6 优先级 0 会把 SysTick(优先级 15) 饿死,
+     *   UART 一旦异常就是**中断里的死循环**, 正是 adc.c/ads8866.c 反复警告的坑。
+     *   就算一切正常, 60 字节一行也要挡住中断约 5ms -> 每次上报丢约 30 拍;
+     *   而时间 t = tick_count/6250 是按**拍**算的, 少采 30 拍就少算 4.8ms,
+     *   于是 DRIFT/IB 每次上报偏大约 0.5%。
+     *   CalZero_Compute() 是双精度最小二乘, 同样吃拍。
+     * 两件事都搬到 CalMode_Task() (主循环) 里做。 */
     if ((tick_count / 6250U) >= (last_progress_sec + 10U))
     {
         last_progress_sec = tick_count / 6250U;
-        CalZero_Compute();
-        CalZero_Progress();
+        progress_due = 1U;
     }
 
     if (tick_count >= CAL_ZERO_TICKS)
     {
         HAL_TIM_Base_Stop_IT(&htim6);
         ADG_Disable();
-        CalZero_Compute();
-        cal_done = 1U;
+        cal_done = 1U;              /* 收尾那次计算也交给主循环 */
     }
 #endif
     /* CAL_BANG: 采样由 Current_Process 完成 */
@@ -211,8 +222,17 @@ void CalMode_Tick(void)
 void CalMode_Task(void)
 {
 #if CAL_MODE == CAL_ZERO
+    /* 进度上报 (从 ISR 搬过来的, 见 CalMode_Tick 的注释) */
+    if (progress_due)
+    {
+        progress_due = 0U;
+        CalZero_Compute();
+        CalZero_Progress();
+    }
+
     if (cal_done)
     {
+        CalZero_Compute();      /* 收尾那次计算也从 ISR 搬到主循环 */
         CalZero_Cumulative();   /* 把本轮均值并进轮间统计 */
         /* 每轮都报; 每 10 轮附一次轮间汇总 (否则要等到跑完才看得到趋势) */
         CalZero_Report(1U);

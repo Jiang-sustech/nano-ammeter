@@ -1,36 +1,44 @@
-# firmware — 实验表征固件
+# firmware-v1 — 现役固件
 
-> ## 本工程与 `firmware-v1/` 的关系（2026-09-13 重新厘清）
+> ## 本工程与 `firmware-v0/` 的关系（2026-09-20 更正）
 
 ```
-firmware-v1/        竞赛交付固件
-firmware/    实验表征固件（本工程）= 交付固件 + M 手动连采指令
+firmware-v1/   现役固件（本工程）—— 被烧录的就是它, 全部论文数据出自它
+firmware-v0/   冻结的旧基线 —— 停在 2026-09-13 那次同步时的样子
 ```
 
-**2026-09-13 做了一次整份同步**：此前两份工程已经漂移到"`current.c` 差 1053 行、
-`firmware-v1` 连 `cal_coef` 都没有"的地步，靠人工定点同步不可靠。现在的关系是
-**单向的**：本工程 = 交付固件 + 一块表征机械，其余**逐字节相同**。
-
-### 现在**唯一**的差别：`M` 手动连采指令
+**两者不是"两代产品"，是同一份代码的两个时点。** 2026-09-13 做过一次整份同步，
+之后开发**全部只进本工程**，v0 再没动过。今天相差 **1124 行 / 8 个文件**：
 
 | 文件 | 差异 |
 |---|---|
-| `Core/Src/current.c` | +149 行：`Current_ManualRun` / `Current_ManualLine` |
-| `Core/Inc/current.h` | +11 行：上面两个的声明 |
-| `Core/Src/main.c`   | +6 行：`M` 指令分发 |
-| `Core/Inc/uart.h`   | +8 行：`M` 的协议说明 |
+| `Core/Src/current.c` | 594 行 —— 拉回相、50 s 长窗口、小电流模式 |
+| `Core/Src/main.c` | 148 行 —— `X=`/`T=` 结果行、窗口切换显示 |
+| `Core/Src/measurement_state.c` | 138 行 —— 自动窗口选择 |
+| `Core/Inc/current.h` | 123 行 —— `CURRENT_WIN_LONG_TICKS` 等 |
+| `Core/Inc/measurement_state.h` | 37 行 |
+| `Core/Src/uart.c` | 37 行 |
+| `Core/Src/cal_mode.c` | 34 行 |
+| `Core/Inc/uart.h` | 13 行 |
 
-```bash
-# 验证：差异只应出现在上面四处
-cd nanoammeter_repo
-for f in $(cd firmware && ls Core/Src/*.c Core/Inc/*.h | sed 's|Core/||'); do
-  d=$(diff <(tr -d '\r' < firmware-v1/Core/$f) <(tr -d '\r' < firmware/Core/$f) | grep -c '^[<>]')
-  [ "$d" -gt 0 ] && printf "%-30s %4d 行\n" "$f" "$d"
-done
-```
+⚠️ **v0 里 `CURRENT_WIN_LONG_TICKS` 一处都没有 → 它做不了亚纳安测量。**
+论文里 1 pA ~ 1 nA 那一段的数据，用 v0 复现不出来。
 
-**交付固件不要 `M` 是正确的** —— 它是表征机械，量 τ、标 `q`、做判别实验用的，
-现场测量用不到，留在交付固件里只会多一份出错面。
+### ⚠️ 本文档原先记的"防漂移约定"已作废
+
+改名前这里写着「**唯一**的差别是 `M` 手动连采指令」「判断标准：差异必须只有那
+四处」「多出来的就是漏同步」，还配了一套三步流程（改 v1 → 验证 → 同步回 v0）。
+
+**那套约定从 2026-09-13 之后从没执行过。** 话在当时是对的，但第三步没人做，
+于是实际差异长成了它自己声称的 **280 倍**。现在把事实记在这里，不再假装两边
+应当一致：
+
+- `firmware-v1/` 是**唯一在开发**的固件
+- `firmware-v0/` **只读**，不再往回同步任何改动
+- 需要 v0 的某个特性时**去 git 历史里翻**，不要指望它跟得上
+
+> `M` 手动连采指令（`Current_ManualRun` / `Current_ManualLine`）仍然只在 v1 里，
+> 但它今天早已不是两者唯一的差别。
 
 ### 双斜率硬积分已从**两个**工程删除（2026-09-13）
 
@@ -47,56 +55,50 @@ done
 > `SI_SETTLE_TICKS` 的单位是**阻塞 `ReadBoth` 的次数**（每次约 23.6 µs），
 > **不是 160 µs 的 TIM6 拍**。旧注释写成"稳定拍数"会让读者差 6.8 倍。
 
-## 防漂移约定
+## v0 与 v1 仍然逐字节相同的部分
 
-### 必须逐字节相同的
+这些是**硬件驱动层与物理常数存储**，到今天两边同源（`Drivers/` 整个目录也
+完全一致）。改一边时想想另一边是否还在用：
 
 ```
-Core/Src/adc.c
-Core/Src/ads8866.c   Core/Inc/ads8866.h      <- 含坏读判据的驱动层, 两边同源
-Core/Src/sh1106.c
-Drivers/                                      <- 整个目录
-Core/Src/cal_coef.c  Core/Inc/cal_coef.h      <- 物理常数存储, 两边都要
-STM32L431xx_FLASH.ld                          <- 最后一页留给校准常数
+Core/Src/adc.c                                <- 一致
+Core/Src/ads8866.c   Core/Inc/ads8866.h       <- 一致; 含坏读判据的驱动层
+Core/Src/sh1106.c                             <- 一致
+Core/Src/cal_coef.c  Core/Inc/cal_coef.h      <- 一致; 物理常数存储
+STM32L431xx_FLASH.ld                          <- 仅注释不同, 存储区定义相同
+Drivers/                                      <- 整个目录逐字节一致
 ```
-
-> **链接脚本那一页必须两边都留。** `firmware-v1` 原来没留（它那时也没有
-> `cal_coef.c`），同步进 `cal_coef` 之后必须补上 —— 否则代码长到 `0x0803F800`
-> 那一页上，`Cal_Save()` 一写就把自己的代码擦了。
 
 ```bash
 cd nanoammeter_repo
-for f in Core/Src/cal_coef.c Core/Inc/cal_coef.h STM32L431xx_FLASH.ld \
+for f in Core/Src/cal_coef.c Core/Inc/cal_coef.h \
          Core/Src/adc.c Core/Src/ads8866.c Core/Inc/ads8866.h Core/Src/sh1106.c; do
-  diff -q firmware/$f firmware-v1/$f && echo "一致 $f"
+  diff -q firmware-v1/$f firmware-v0/$f && echo "一致 $f"
 done
-diff -rq firmware/Drivers firmware-v1/Drivers
+diff -rq firmware-v1/Drivers firmware-v0/Drivers
+# STM32L431xx_FLASH.ld 不在上面 —— 它只有注释不同, 用 diff 看一眼即可
 ```
 
-### 修改流程
-
-1. **在 `firmware` 里改**（它是超集），验证
-2. 改动**与 `M` 指令无关**的，**同步回 `firmware-v1`**
-3. 同步后按上面的脚本核一遍差异 —— 应当只出现在那四行
-
-> **判断标准**：差异必须只有 `M` 指令那四处。多出来的就是漏同步。
+> **链接脚本那一页两边都留住了。** `firmware-v0` 原来没留（它那时也没有
+> `cal_coef.c`），同步进 `cal_coef` 之后补上了 —— 否则代码长到 `0x0803F800`
+> 那一页上，`Cal_Save()` 一写就把自己的代码擦了。
 
 ## 构建
 
 ```bash
 cmake --preset Debug
-cmake --build build/Debug          # 产出 firmware.elf
+cmake --build build/Debug          # 产出 firmware-v1.elf
 ```
 
 ## 与上位机的关系
 
 两个固件**共用同一个控制台** `../console.html`。
 控制台里的「实验表征」面板只在与本固件通信时有用；
-对着 `firmware-v1` 用时该面板不会响应（系数查询无回包）。
+对着 `firmware-v0` 用时该面板不会响应（系数查询无回包）。
 
 ## 扩展协议（仅本固件有）
 
-在 `firmware-v1` 原有协议（`S`/`D`/`B`/`X`/`E`）之上增加以下指令。
+在 `firmware-v0` 原有协议（`S`/`D`/`B`/`X`/`E`）之上增加以下指令。
 
 ### 为什么要用整数传系数
 
@@ -140,7 +142,7 @@ I=+25.274 nA X=+25.271 nA MODE=1 T=1000ms CAL=+25.270 RAW m=5003 n=6251 INT1=589
 | `X=` | 由 **ADS8866** 算出的原始值 ← **拟合用的就是这个** |
 | `T=` | 实际积分时长（ms）。模式一恒为 1000ms；小电流模式是设定值，撞轨提前收尾时更短 —— 报告里 `I = C·ΔV/T` 的 T 就是它，**必须记录** |
 | `CAL=` | `X=` 经分段校准模型后的最终输出（未校准时不出这个字段） |
-| ` TIMEOUT` | 后缀。本固件已无模式二，正常不会出现；保留解析是为了兼容 `firmware-v1` |
+| ` TIMEOUT` | 后缀。本固件已无模式二，正常不会出现；保留解析是为了兼容 `firmware-v0` |
 | `RAW …` | **模式一专属**的原始量，见下 |
 
 > 上位机的 `I=` 解析正则不锚定行尾，追加字段不会破坏现有解析。

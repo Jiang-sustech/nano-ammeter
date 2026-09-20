@@ -40,7 +40,7 @@
  *   a        ppm    (×1e6)
  *   b        fA     (×1e15)
  *
- * 协议见 firmware/README.md
+ * 协议见 firmware-v1/README.md
  * ============================================================ */
 
 #define CAL_SEG_COUNT   3

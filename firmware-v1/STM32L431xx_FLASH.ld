@@ -57,10 +57,7 @@ MEMORY
 {
 RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 48K
 RAM2 (xrw)      : ORIGIN = 0x10000000, LENGTH = 16K
-/* 最后一页 (0x0803F800, 2KB) 留给校准系数, 见 cal_coef.c。
- * 2026-09-13 补: 原来 nano_ammeter 没留这一页 —— 它此前也没有 cal_coef.c,
- * 所以没问题; 同步进 cal_coef 之后必须留, 否则代码可能长到那一页上,
- * Cal_Save() 一写就把自己的代码擦了 (或反过来)。 */
+/* 最后一页 (0x0803F800, 2KB) 留给校准系数, 见 cal_coef.c */
 FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 254K
 }
 

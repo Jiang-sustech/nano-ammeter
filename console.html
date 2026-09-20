@@ -231,14 +231,14 @@
   <div id="waveInfo"></div>
 </div>
 
-<!-- 实验表征 (只对 firmware 固件有效) -->
+<!-- 实验表征 (只对 firmware-v1 固件有效) -->
 <div class="card">
   <h2>实验表征 <button id="btnExpToggle" class="png-btn" style="float:right">展开</button></h2>
   <div id="expBody" style="display:none">
 
     <div style="color:var(--dim);font-size:0.8rem;margin-bottom:14px;">
       逐点采集：填 2636B 标准值 → 采集 → 自动配对记录 → 导出。
-      只对 <b>firmware</b> 固件有效；对着 firmware-v1 用只会收到相同读数。
+      只对 <b>firmware-v1</b> 固件有效；对着 firmware-v0 用只会收到相同读数。
     </div>
 
     <div class="exp-row">
@@ -322,10 +322,10 @@ const WCH_FILTER   = [{ usbVendorId: 0x1A86 }];   /* 任意沁恒 WCH 串口芯�
  *    (Web Serial 用错波特率不会报错), 极易误判成板子坏了。
  *
  *    **两个工程现在都是 115200, 这里不用改。**
- *      firmware-v1/Core/Src/uart.c:10              115200
- *      firmware/Core/Src/uart.c:40          115200 (BOARD_BAUD)
+ *      firmware-v0/Core/Src/uart.c:10              115200
+ *      firmware-v1/Core/Src/uart.c:40          115200 (BOARD_BAUD)
  *
- *    firmware 曾在 2026-09-16 提到 2 Mbps, **当天就改回来了** ——
+ *    firmware-v1 曾在 2026-09-16 提到 2 Mbps, **当天就改回来了** ——
  *    实测那是板载 CH340G 的带宽上限, 丢字节丢在 CH340 -> USB -> 主机这一段:
  *        115200   1.085 s/整窗  全清
  *        921600   0.147 s       89% 一次成功, 重传后 0 丢失
@@ -444,7 +444,7 @@ function setStatus(raw) {
   }
   /* 结果行: 每次 S 只有一条 (measurement_state.c: 出结果即回 IDLE)
    * ⚠️ 用共用的 RESULT_RE, **别再写内联正则** —— 2026-09-17 就是因为这里
-   *    写了一份"nA 后紧跟 MODE="的简化版, 匹配不上 firmware 的
+   *    写了一份"nA 后紧跟 MODE="的简化版, 匹配不上 firmware-v1 的
    *    X= 字段, 结果行认不出来、按钮不恢复。 */
   const m = RESULT_RE.exec(raw);
   if (m) {
@@ -554,10 +554,10 @@ function onWaveComplete(wm) {
 
 var TICK_US = 160;   /* 波形采样间隔 160µs/点, 与固件 WAVE/WAVEX 同窗口 */
 
-/* 固件结果行。**必须容下 firmware 多出来的 X= 字段** —— 那一版在
+/* 固件结果行。**必须容下 firmware-v1 多出来的 X= 字段** —— 那一版在
  * I= 与 MODE= 之间插了一段 " X=+24.776 nA":
- *     firmware-v1/       I=+25.274 nA MODE=1
- *     firmware/   I=+24.776 nA X=+24.776 nA MODE=1 T=1000ms TIMEOUT RAW m=…
+ *     firmware-v0/       I=+25.274 nA MODE=1
+ *     firmware-v1/   I=+24.776 nA X=+24.776 nA MODE=1 T=1000ms TIMEOUT RAW m=…
  * 2026-09-17 实测: 少写这个可选项, **两代行里只有旧的一代能匹配** ——
  * 症状是控制台收到了结果、日志也照打, 但 setStatus() 认不出来,
  * setBusy(false) 永不执行, **按钮一直是灰的, 看起来像"测完不恢复"**。
@@ -812,7 +812,7 @@ function download(text, name, mime) {
 
 /* ============================================================
  * 实验表征面板: 逐点采集 + 校准系数收发
- * 只对 firmware 固件有效; 协议见 firmware/README.md
+ * 只对 firmware-v1 固件有效; 协议见 firmware-v1/README.md
  *
  * 表格与 CSV 的计算抽成纯函数 (expRows / expCsv / calParse),
  * 自测可直接喂数据断言, 不必经过 DOM。
@@ -1038,7 +1038,7 @@ function calWrite() {
 const SEQ_RETRY = 2;                  /* 每步最多重发次数 */
 const SEQ_STEPS = [
   { cmd: 'E', line: 'EXT ',  tag: null,    timeout: 6000,  label: '观测通路自检' },
-  /* ⚠️ S 的超时**必须覆盖固件的最长窗口**。firmware 的自动路径在
+  /* ⚠️ S 的超时**必须覆盖固件的最长窗口**。firmware-v1 的自动路径在
    *    |I| < 1 nA 时会先跑 1 s 判据窗、再跑长窗, 一次 S 最坏 = 1 + 50 秒。
    *    长窗 2026-09-17 由 10 s 改成 50 s (current.h 的 CURRENT_WIN_LONG_TICKS),
    *    所以这里从 25000 提到 60000。**改固件那个常数时要一起来看这里。** */

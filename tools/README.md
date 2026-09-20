@@ -46,7 +46,7 @@ from cal_sweep import ...
 | `sweep_pulse.py` | 脉冲实验采集（TSP 脉冲源模式）|
 | `cal_sweep.py` | 标定扫描（CLI）；也是所有人的底层库 |
 | `warm_test.py` | 预热必要性对照实验（always / never / first）|
-| `nanoammeter_capture.py` | 单次采集 → `raw_<日期>_<值>nA.npz/.png/.log`。⚠️ 对 `firmware` 要加 `--no-noise`（该固件已删底噪指令）|
+| `nanoammeter_capture.py` | 单次采集 → `raw_<日期>_<值>nA.npz/.png/.log`。⚠️ 对 `firmware-v1` 要加 `--no-noise`（该固件已删底噪指令）|
 | `pulse_real.py` | 真实脉冲波形重建（PC 翻转 / 仪器脉冲），含整窗原始码反推 |
 | `test_smu.py` | 源表连通与功能自检 |
 

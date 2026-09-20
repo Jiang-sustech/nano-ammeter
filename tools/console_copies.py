@@ -28,7 +28,7 @@ def probe(path):
     return dict(
         mtime=datetime.datetime.fromtimestamp(os.path.getmtime(path)),
         size=len(s),
-        has_x=("X=[+-][0-9]+" in s),          # 结果行正则是否容下 firmware 的 X= 段
+        has_x=("X=[+-][0-9]+" in s),          # 结果行正则是否容下 firmware-v1 的 X= 段
         s_timeout=(m.group(1) if m else "?"),
         footer_50=("50 秒长窗" in s),
     )

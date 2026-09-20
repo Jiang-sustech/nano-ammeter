@@ -6,7 +6,7 @@
 #       串口 E 指令正常应答)。
 #
 # 用法:  bash tools/run_app.sh
-#        bash tools/run_app.sh <elf路径>      # 默认 firmware/build/Debug
+#        bash tools/run_app.sh <elf路径>      # 默认 firmware-v1/build/Debug
 #
 # 注意: 必须先设 VTOR = 0x08000000。只改 PC/MSP 不设 VTOR 的话, 一旦出错硬故障向量
 #       仍从 ROM 的向量表取, PC 会掉回 0x1FFF_xxxx —— 那次"灌 PC 也没用"的误判就是这么来的。
@@ -15,7 +15,7 @@ set -euo pipefail
 OPENOCD="${OPENOCD:-/c/Users/40512/STM32Toolchain/openocd/bin/openocd}"
 SCRIPTS="${OPENOCD_SCRIPTS:-/c/Users/40512/STM32Toolchain/openocd/share/openocd/scripts}"
 
-ELF="${1:-$(dirname "$0")/../firmware/build/Debug/firmware.elf}"
+ELF="${1:-$(dirname "$0")/../firmware-v1/build/Debug/firmware-v1.elf}"
 [ -f "$ELF" ] || { echo "找不到 ELF: $ELF" >&2; exit 1; }
 
 # 向量表前两个字就是初始 MSP 与 Reset_Handler —— 直接问芯片, 不用手工抄
