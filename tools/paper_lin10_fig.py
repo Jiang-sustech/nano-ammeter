@@ -19,6 +19,7 @@
 ⚠️ 装置读数取的是**式(6) 算出来的**值, 不是 CSV 的 dev_nA ——
    后者只有 3 位小数 (nA), 分辨不到 0.5 pA, 画这张图会全是台阶。
 """
+import argparse
 import csv
 import os
 import statistics
@@ -28,16 +29,23 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from report_table import i_of                # noqa: E402
+from report_table import i_of, CONST_FW, CONST_FIT   # noqa: E402
 import paper_style as ps                     # noqa: E402
 
 ps.apply()
+
+# ⚠️ 三常数有两套, 差在取整 (见 report_table.py 的注释)。
+#    默认 `fit` —— 最小二乘直接给的小数, 物理上更好的估计。
+#    换成 `fw` (固件里存的整数 pA) 会让残差整体平移 0.265 pA,
+#    在 ±10 pA 段上是该段读数的 2.7%, 图上一眼看得出来。
+#    **图的说明里必须写明用的哪一套**, 否则别人复现不出同一个数。
+CONSTS = {'fw': CONST_FW, 'fit': CONST_FIT}
 
 SRC = 'data/lin_10nA_mirror/raw.csv'
 OUT = 'image_paper/fig06_lin10_residual.png'
 
 
-def load(path):
+def load(path, const):
     out = []
     with open(path, encoding='utf-8') as f:
         for r in csv.DictReader(f):
@@ -45,7 +53,7 @@ def load(path):
                 continue
             out.append((float(r['true_nA']) * 1e3,                       # pA
                         i_of(int(r['ext1']), int(r['ext2']),
-                             int(r['m']), int(r['n'])) * 1e12,           # pA
+                             int(r['m']), int(r['n']), *const) * 1e12,   # pA
                         float(r['set_nA'])))
     return out
 
@@ -56,7 +64,18 @@ def main():
     except (AttributeError, OSError):
         pass
 
-    pts = load(SRC)
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--const', default='fit', choices=sorted(CONSTS),
+                    help='用哪一套三常数: fit = 最小二乘给的小数 (默认); '
+                         'fw = 固件里存的整数 pA。两者差 0.265 pA, '
+                         '在 ±10 pA 段上是 2.7%%, 图的说明要写明用了哪套')
+    ap.add_argument('-o', '--out', default=OUT)
+    a = ap.parse_args()
+    const = CONSTS[a.const]
+    print('常数: %s  I+=%.5f nA  I-=%.5f nA  (q=%.8e)'
+          % (a.const, const[1] * 1e9, const[2] * 1e9, const[0]))
+
+    pts = load(SRC, const)
     if not pts:
         sys.exit('没读到 %s' % SRC)
     std = np.array([p[0] for p in pts])
@@ -103,10 +122,14 @@ def main():
     ax.set_ylim(mu - 4.5 * sd, mu + 4.5 * sd)
     ps.grid(ax)
     ax.legend(loc='lower right', framealpha=.95, ncol=3)
-    ps.caption(fig, cap_y, '±10 pA 微电流段的残差')
+    ps.caption(fig, cap_y,
+               '±10 pA 微电流段的残差\n'
+               '三常数: %s（I+ = %.5f nA, I- = %.5f nA）'
+               % ('最小二乘拟合值' if a.const == 'fit'
+                  else '固件存储值（整数 pA）', const[1] * 1e9, const[2] * 1e9))
     os.makedirs('image_paper', exist_ok=True)
-    fig.savefig(OUT)
-    print('已写', OUT)
+    fig.savefig(a.out)
+    print('已写', a.out)
 
 
 if __name__ == '__main__':

@@ -32,14 +32,19 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from report_table import i_of                       # 式(6), 公共实现
+from report_table import i_of, CONST_FW, CONST_FIT   # 式(6), 公共实现
+
+# ⚠️ 三常数有两套, 差在取整 (见 report_table.py 的注释)。默认 fit。
+#    换 fw 会让曲线整体平移 0.265 pA —— 在 1~10 pA 段上就是
+#    检测下限从 6 pA 变到 15 pA。**图的说明里必须写明用的哪套。**
+CONSTS = {'fw': CONST_FW, 'fit': CONST_FIT}
 from uncal_vs_cal import caption, RED, BLUE, BLACK  # 图名定位 + 同一套配色
 
 plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
 
 
-def load(path):
+def load(path, const=None):
     """raw.csv -> [(I_std_nA, I_cal_nA, t_ms), ...]  逐点均值"""
     g = {}
     with open(path, encoding='utf-8') as f:
@@ -51,7 +56,8 @@ def load(path):
     for k in sorted(g):
         v = g[k]
         std = sum(float(r['true_nA']) for r in v) / len(v)
-        cal = sum(i_of(int(r['ext1']), int(r['ext2']), int(r['m']), int(r['n']))
+        cal = sum(i_of(int(r['ext1']), int(r['ext2']), int(r['m']), int(r['n']),
+                       *(const or CONST_FIT))
                   for r in v) / len(v) * 1e9
         out.append((std, cal, v[0]['t_ms'], k))
     return out
@@ -85,13 +91,18 @@ def main():
     ap.add_argument('--dir', default='data/lowI_pos')
     ap.add_argument('--thr', type=float, default=5.0, help='误差阈值 (%%), 默认 5')
     ap.add_argument('-o', '--out', default=None)
+    ap.add_argument('--const', default='fit', choices=sorted(CONSTS),
+                    help='用哪一套三常数: fit = 最小二乘给的小数 (默认); '
+                         'fw = 固件里存的整数 pA (会让曲线整体平移 0.265 pA)')
     a = ap.parse_args()
     if a.out is None:
         # 同 lowI_compare: 名字带数据目录, 免得负向那批把正向的图盖掉
         tag = os.path.basename(os.path.normpath(a.dir)) or 'out'
         a.out = 'data/%s_error_curve.png' % tag
 
-    pts = load(os.path.join(a.dir, 'raw.csv'))
+    print('常数: %s  I+=%.5f nA  I-=%.5f nA'
+          % (a.const, CONSTS[a.const][1]*1e9, CONSTS[a.const][2]*1e9))
+    pts = load(os.path.join(a.dir, 'raw.csv'), CONSTS[a.const])
     if not pts:
         sys.exit("没读到 %s/raw.csv" % a.dir)
 
@@ -173,7 +184,10 @@ def main():
     caption(ax,
             '低电流段测量误差曲线（对数坐标）\n'
             '%d 个电流点，1 pA ~ 4 nA，每点 3 次取均值　'
-            '基准 = 2636B 回读值　2026-09-16' % len(pts),
+            '基准 = 2636B 回读值　2026-09-16\n'
+            '三常数: %s'
+            % (len(pts), '最小二乘拟合值' if a.const == 'fit'
+               else '固件存储值（整数 pA）'),
             dy=54, note_dy=96,
             note='注：纵轴为对数，画的是误差绝对值 —— 误差在 1~2 nA 之间过零'
                  '（+0.17% → −0.05%），负值在对数轴上无法表示。')

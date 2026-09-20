@@ -278,6 +278,82 @@ def draw_inter(lam, d):
     return vs, nu, hv, ir, k
 
 
+def _window(pts, d):
+    """左右两格共用的电压窗口: 从平台末点稍左, 到细扫末点稍右。"""
+    v = np.sort(np.array([p[0] for p in pts]))
+    ir, npl = plateau(pts)
+    lo = v[npl - 1] - 0.05
+    hi = max(p[0] for p in d['fine']) + 0.04
+    return lo, hi
+
+
+def draw_compare(lam, d):
+    """左右对照: 左 = 零电流法, 右 = 交点法。同一批数据、同一个电压窗口。"""
+    pts = d['coarse'] + d['mid'] + d['fine']
+    V = np.array([p[0] for p in pts]); I = np.array([p[1] for p in pts]) * 1e3
+    vs0, dvs0, k0, b0, _ = fit_vs(d['fine'])
+    vsi, ki, bi, ir, npl = fit_inter(pts, d['fine'])
+    lo, hi = _window(pts, d)
+    m = (V >= lo) & (V <= hi)
+
+    # cap_lines=2: 图名是两行 (第二行报两个 Vs), 按一行留边距会压住横轴标签
+    fig, cap_y = ps.figure(14.5, cap_lines=2, title=True)
+    ax1 = fig.add_subplot(1, 2, 1)
+    ax2 = fig.add_subplot(1, 2, 2)
+    fig.subplots_adjust(wspace=0.30)
+
+    # 纵轴范围: 由**数据**定, 不让拟合线把它拉到很低。
+    # 拟合线在窗口左端会到 -100 pA 量级, 按它定范围会把 30 pA 的数据压扁;
+    # 让线在底部被裁掉即可。下方留 0.30 倍量程给右下角图例。
+    dv = float(I[m].max() - min(I[m].min(), ir))
+    ylo = min(float(I[m].min()), ir) - 0.30 * dv
+    yhi = float(I[m].max()) + 0.12 * dv
+
+    # (a) 零电流法: 线性拟合与 I=0 的交点
+    ax1.plot(V[m], I[m], 'o', color=ps.BLUE, ms=ps.MS + .5, mec=ps.BLUE,
+             mew=ps.MEW, label='实测')
+    xe = np.array([lo, hi])
+    ax1.plot(xe, k0 * xe + b0, '-', color=ps.BLACK, lw=ps.LW_MAIN,
+             label='线性拟合')
+    ax1.axhline(0, color=ps.BLACK, lw=ps.LW_THIN, ls='--', label='$I = 0$')
+    ax1.plot([-vs0], [0], 'o', color=ps.RED, ms=ps.MS + 4, mec=ps.BLACK,
+             mew=0.9, zorder=5, label='交点')
+    ax1.set_ylabel('光电流   (pA)')
+    ax1.set_xlabel('电压   (V)')
+    ax1.set_xlim(lo, hi); ax1.set_ylim(ylo, yhi)
+    ps.grid(ax1)
+    ax1.legend(loc='lower right', framealpha=.95, ncol=2)
+    ax1.set_title('(a) 零电流法　$V_s$ = %.4f V' % vs0, color=ps.BLACK)
+
+    # (b) 交点法: 线性段延长线与平台水平线的交点
+    ax2.plot(V[m], I[m], 'o', color=ps.BLUE, ms=ps.MS + .5, mec=ps.BLUE,
+             mew=ps.MEW, label='实测')
+    ax2.plot(xe, ki * xe + bi, '-', color=ps.BLACK, lw=ps.LW_MAIN,
+             label='线性段拟合（延长）')
+    ax2.axhline(ir, color=ps.RED, lw=ps.LW_MAIN, ls='--',
+                label='平台 %.1f pA' % ir)
+    ax2.axhline(0, color=ps.BLACK, lw=ps.LW_THIN, ls='--')
+    ax2.plot([-vsi], [ir], 'o', color=ps.RED, ms=ps.MS + 4, mec=ps.BLACK,
+             mew=0.9, zorder=5, label='交点')
+    ax2.set_xlabel('电压   (V)')
+    ax2.set_xlim(lo, hi); ax2.set_ylim(ylo, yhi)
+    ps.grid(ax2)
+    ax2.legend(loc='lower right', framealpha=.95, ncol=2)
+    ax2.set_title('(b) 交点法　$V_s$ = %.4f V' % vsi, color=ps.BLACK)
+
+    ps.caption(fig, cap_y,
+               '光电效应 I–V 曲线（%.0f nm）　零电流法与交点法对照\n'
+               '零电流法 $V_s$ = %.4f V，交点法 $V_s$ = %.4f V，差 %+.4f V'
+               % (lam, vs0, vsi, vsi - vs0))
+    os.makedirs(OUTDIR, exist_ok=True)
+    p = os.path.join(OUTDIR, 'fig%s_%dnm_compare.png'
+                     % ({546.0: '07', 436.0: '08', 365.0: '09'}[lam], lam))
+    fig.savefig(p)
+    plt.close(fig)
+    print('  已写', p)
+    return vs0, vsi, ir
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding='utf-8')
@@ -379,6 +455,64 @@ def main():
              - min(inter[l][2] - inter[l][0] for l in lams)))
     einstein_plot(lams, nu, vi, np.full(len(lams), 0.03), ai, bi, hi_, float('nan'),
                   fname='fig11_einstein_plot_inter.png', suffix='，交点法')
+
+    # ---- 左右对照四张 ----
+    print('\n' + '=' * 70)
+    print('左右对照（两种拟合方法并排）')
+    print('=' * 70)
+    for lam in sorted(DATA, reverse=True):
+        draw_compare(lam, DATA[lam])
+    einstein_compare(lams, nu, res, inter)
+
+
+def einstein_compare(lams, nu, res, inter):
+    """Vs–ν 左右对照: 左 = 零电流法拟合, 右 = 交点法拟合。同一批点, 两条线。"""
+    v0 = np.array([res[l][0] for l in lams])
+    d0 = np.array([res[l][1] for l in lams])
+    vi = np.array([inter[l][0] for l in lams])
+
+    fig, cap_y = ps.figure(13.0, cap_lines=2, title=True)
+    ax1 = fig.add_subplot(1, 2, 1)
+    ax2 = fig.add_subplot(1, 2, 2)
+    fig.subplots_adjust(wspace=0.24)
+    x = nu / 1e14
+
+    allv = np.concatenate([v0, vi])          # 两格共用的 y 范围
+    both = []
+    for ax, v, dy, tag in ((ax1, v0, d0, '零电流法'), (ax2, vi, d0, '交点法')):
+        a_, b_ = np.polyfit(nu, v, 1)
+        h_ = a_ * E
+        r = v - (a_ * nu + b_)
+        ss, st = float(np.sum(r ** 2)), float(np.sum((v - v.mean()) ** 2))
+        R2 = 1 - ss / st
+        both.append((tag, h_, R2, a_))
+        ax.errorbar(x, v, yerr=dy, fmt='o', color=ps.BLUE, ms=ps.MS + 2,
+                    mec=ps.BLUE, mew=ps.MEW, ecolor=ps.BLUE, elinewidth=1.0,
+                    capsize=3, label='实测 $V_s$')
+        xe = np.array([x.min(), x.max()]) * np.array([0.85, 1.15])
+        ax.plot(xe, a_ * xe * 1e14 + b_, '-', color=ps.BLACK, lw=ps.LW_MAIN,
+                label='线性拟合')
+        ax.set_xlabel('频率  $\\nu$   ($10^{14}$ Hz)')
+        if ax is ax1:
+            ax.set_ylabel('遏止电压  $V_s$   (V)')
+        # 两格 y 轴范围必须一致 —— 对照图上各格自适应会让斜率差看着失真
+        ax.set_ylim(allv.min() * 0.50, allv.max() * 1.35)
+        ps.grid(ax)
+        ax.legend(loc='lower right', framealpha=.95)
+        ax.set_title('(%s) %s　$h$ 偏差 %+.2f %%'
+                     % ('a' if ax is ax1 else 'b', tag, (h_ - H) / H * 100),
+                     color=ps.BLACK)
+
+    ps.caption(fig, cap_y,
+               '遏止电压与频率的关系　两种定 $V_s$ 方法对照\n'
+               '零电流法 $h$ = %.4e（%+.2f %%），交点法 $h$ = %.4e（%+.2f %%）'
+               % (both[0][1], (both[0][1] - H) / H * 100,
+                  both[1][1], (both[1][1] - H) / H * 100))
+    os.makedirs(OUTDIR, exist_ok=True)
+    p = os.path.join(OUTDIR, 'fig10_einstein_compare.png')
+    fig.savefig(p)
+    plt.close(fig)
+    print('  已写', p)
 
 
 def einstein_plot(lams, nu, vs, dvs, a, b, h, dh,
