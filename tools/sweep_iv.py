@@ -22,6 +22,18 @@
      不走电流, 接上去电流测量的通路就是断的 (读数停在几十 fA 的开路本底)。
      电流必须走 **FORCE HI/LO**。
 
+  ⚠️ **两路的 LO 必须接到同一个公共端** (A.LO ↔ B.LO), 否则回路不闭合。
+     A 只接 HI 是不行的 —— 源需要一条流回去的路。
+
+  ⚠️ B 当电流表用的是 **0 V 电压源** (理想短路), **不是 0 A 电流源**。
+     0 A 电流源在串联回路里会阻止电流流过, 是个堵路的。详见 setup() 里的注释。
+
+自检
+----
+接好线先跑这个, 判据是 **|I_A| ≈ |I_B| 且符号相反**:
+    A 灌多少、B 就必须读多少 —— 这是"电流确实穿过 B"的唯一硬证据。
+比值不是 -1 就说明 B 不在回路里, 此时任何 I-V 数据都不可信。
+
 配置 (用户 2026-09-21 定)
 ------------------------
     A 路 (smua)  源**电压** -2.00 V → 0 V, 步长 0.1 V
@@ -114,12 +126,22 @@ def setup(smu, a):
     smu_write(smu, 'smub.source.offmode   = smub.OUTPUT_NORMAL')
     smu_write(smu, 'smub.source.offfunc   = smub.OUTPUT_DCAMPS')
     smu_write(smu, 'smub.source.offlimitv = 2')
-    # 0 A 源 + 开输出 = 零压降电流表。这是 2600B 上"把 SMU 当安培计用"的标准做法:
-    # 不走 2400 仿真模式, 也不需要额外的电流表量程命令。
-    smu_write(smu, 'smub.source.func   = smub.OUTPUT_DCAMPS')
-    smu_write(smu, 'smub.source.leveli = 0')
-    smu_write(smu, 'smub.source.limitv = %g' % a.vlimit_b)
-    smu_write(smu, 'smub.source.autorangei = smub.AUTORANGE_ON')
+    # ★★ 电流表 = **0 V 电压源**, 不是 0 A 电流源 ★★
+    #
+    # 2026-09-21 实测踩到的坑, 这里以前写的是 `source.func = DCAMPS` +
+    # `source.leveli = 0`, **错的**:
+    #   0 A 电流源在串联回路里会调整自己的电压去**阻止**电流流过 ——
+    #   它是个"堵路"的, 不是电流表。实测 B 端电压稳定等于 A 的 **0.6 倍**
+    #   (纯分压), B 只读到 0.5 pA 而 A 明明灌了 25 pA。
+    #   换成 0 V 电压源 (=理想短路, 零压降) 后 B 端电压降到 **10 µV**,
+    #   这才是零负担电流表的正确形态。
+    #
+    # 一般规则: **串联测电流用电压源 0 V, 不要用电流源 0 A。**
+    smu_write(smu, 'smub.source.func   = smub.OUTPUT_DCVOLTS')
+    smu_write(smu, 'smub.source.levelv = 0')
+    # 对电压源, 合规量是**电流**; 它是电流表, 给足即可
+    smu_write(smu, 'smub.source.limiti = %.9e' % a.ilimit_b)
+    smu_write(smu, 'smub.source.autorangev = smub.AUTORANGE_ON')
     # 同上: 无 measure.func。直接调 smub.measure.i()。
     smu_write(smu, 'smub.measure.autorangei = smub.AUTORANGE_ON')
     smu_write(smu, 'smub.measure.nplc = %g' % a.nplc)
@@ -197,8 +219,9 @@ def main():
     ap.add_argument('--limiti', type=float, default=1e-3,
                     help='★ A 路(电压源)的限流, 单位 A。默认 1 mA —— '
                          '光电探测器的典型安全值。这是唯一在故障时保护被测件的设置')
-    ap.add_argument('--vlimit-b', type=float, default=2.0,
-                    help='B 路(电流表)的合规电压 V, 默认 2。只是兜底, 不是工作点')
+    ap.add_argument('--ilimit-b', type=float, default=1e-3,
+                    help='B 路(电流表)的**限流**, 单位 A, 默认 1 mA。'
+                         'B 是 0 V 电压源, 对电压源合规量是电流 —— 给足即可')
     ap.add_argument('--single', action='store_true',
                     help='单通道模式: 只用 A 路, 它自己"源电压 + 测电流"。'
                          '接线只需 A.HI -> 探测器 -> A.LO 两根线, 不用 B 路。'
@@ -229,7 +252,8 @@ def main():
         print("  接线     单通道: A.HI → 探测器 → A.LO  (两根线; B 路不用)")
     else:
         print("  接线     双通道: A.HI → 探测器 → B.HI, B.LO → A.LO")
-        print("  B 路合规 %.4g V" % a.vlimit_b)
+        print("           ⚠️ A.LO 与 B.LO 必须接到**同一个公共端**, 否则回路不闭合")
+        print("  B 路限流 %.4g A  (B 是 0V 电压源 = 零压降电流表)" % a.ilimit_b)
     # 耗时估算 —— 系数是 2026-09-21 两轮实跑反解出来的, 不是拍的:
     #   默认 (settle 0.2 / n 1 / nplc 1 / delay 0) 实测 27.5 s / 41 点
     #   delay=-1                                  实测 58.5 s / 41 点
