@@ -6,8 +6,17 @@
 
 | 文件 | 说明 |
 |---|---|
+| [`jlc-project.zip`](jlc-project.zip) | **嘉立创EDA专业版工程源文件**（原理图 + PCB + BOM + 网表）|
 | [`Schematic.png`](Schematic.png) | 原理图（整页）|
 | [`gerber/`](gerber/) | Gerber 制板文件（4 层板 + 3 个钻孔文件）|
+
+## 源工程（嘉立创EDA专业版）
+
+`jlc-project.zip` 解压后是 `.epro2` 工程包，用**嘉立创EDA（专业版）**
+`文件 → 打开工程` 直接导入。工程内已包含原理图、PCB 版图、BOM 与网表，
+元件属性带立创商城（LCSC）编号，可直接下单。
+
+> 源工程不含姓名、邮箱、本地路径等个人信息（仅含 LCSC 厂商/料号等公开数据）。
 
 ## 板子概况
 

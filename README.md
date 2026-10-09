@@ -64,7 +64,7 @@ $m$ / $n$ 为 `SEL_POS` / `SEL_NEG` 两相的驻留拍数，$T_{\text{int}}=160\
   [`firmware-v0/`](firmware-v0/)（冻结的旧基线，2026-09-13 止，只读）
 - **上位机** — [`console.html`](console.html)，单文件、无外部依赖、
   Chrome/Edge 双击即用
-- **硬件文件** — [`hardware/`](hardware/)：原理图 + 4 层 Gerber
+- **硬件文件** — [`hardware/`](hardware/)：嘉立创源工程 + 原理图 + 4 层 Gerber
 
 ## 积分窗口
 
@@ -98,7 +98,7 @@ cd firmware-v1 && cmake --build build/Debug
 
 | 目录 | 说明 |
 |---|---|
-| [`hardware/`](hardware/) | 原理图 + Gerber 制板文件（4 层板）|
+| [`hardware/`](hardware/) | 嘉立创源工程 + 原理图 + Gerber（4 层板）|
 | [`firmware-v1/`](firmware-v1/) | 现役固件（被烧录的那个）|
 | [`firmware-v0/`](firmware-v0/) | 冻结的旧基线，只读归档 |
 | [`tools/`](tools/) | 采集与分析脚本（[索引](tools/README.md)）|
