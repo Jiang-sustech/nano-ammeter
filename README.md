@@ -1,471 +1,228 @@
 # 纳安表 (Nano-Ammeter)
 
-基于**电荷平衡原理**的微弱电流测量仪。用于物理实验竞赛中光电效应、脉冲电流等
-需要 pA 级分辨的场景。硬件、固件、上位机、标定与分析脚本全部开源。
+基于电荷平衡原理的微弱电流测量仪，面向光电效应、脉冲电流等 pA 级测量场景。
+硬件、固件、上位机与 PC 脚本全部开源。
 
-## 这是什么
+## 1. 性能
 
-一台自制的皮安表。核心指标：
-
-| 项目 | 指标 | 说明 |
+| 项目 | 指标 | 条件 |
 |---|---|---|
-| 直流量程 | **±45 nA** | 受参考电流 ±50 nA 限制 |
-| 显示分辨率 | **0.01 pA** | 固件量化到 0.01 pA（nA 保留 5 位小数）|
-| 单次重复性 | **0.027 pA** | 50 s 积分窗，1 pA~500 pA 段 31 个电流点合并 |
-| 线性度（校准后）| **0.0046 %FS** | 162 点，满量程 ±45 nA |
-| 脉冲峰值 | 可测至 **4.2 µA** | 超出直流量程 **93 倍**，偏差 −0.58% |
+| 直流量程 | ±45 nA | 受参考电流 ±50 nA 限制 |
+| 显示分辨率 | 0.01 pA | 固件量化 |
+| 单次重复性 | 0.027 pA | 50 s 积分窗，1 pA–500 pA 段 31 点合并 |
+| 线性度（校准后）| 0.0046 %FS | 162 点，满量程 ±45 nA |
+| 脉冲峰值 | 4.2 µA | 超直流量程 93 倍，偏差 −0.58% |
 
-**为什么能做脉冲。** 本装置的输出量**本身就是积分窗口内的平均电流**
+装置输出量即积分窗口内的平均电流
 
 $$I_{\text{out}}=\frac{1}{\tau}\int_{t-\tau}^{t} i(t)\,\mathrm{d}t$$
 
-因此对脉冲输入**不需要峰值检波、频谱搬移或同步采样** —— 峰值远超直流量程时
-仍能正确读出等效平均值。这是原理层面的结构性优势。
+故对脉冲输入无需峰值检波、频谱搬移或同步采样，峰值远超直流量程时仍可正确读出等效平均值。
 
-## 测量原理
+## 2. 仓库结构
 
-积分器以 **±50 nA 两路参考电流**在 bang-bang 逻辑下交替注入，把被测电流
-始终约束在两个电压阈值之间。窗口结束后，用**首尾两个采样码之差**与
-**两路参考各自的驻留拍数**算出窗口平均电流：
-
-$$I=\frac{q\,\Delta c}{(m+n)\,T_{\text{int}}}-\frac{m\,I_+ + n\,I_-}{m+n}$$
-
-其中 $q$ 为积分电容对应的每码电荷，$\Delta c$ 为窗口首尾码差，
-$m$ / $n$ 为 `SEL_POS` / `SEL_NEG` 两相的驻留拍数，$T_{\text{int}}=160\,\mu s$。
-
-**分母是 $m+n$ 而不是任何硬编码的拍数** —— 所以公式对任何窗口长度同样成立，
-换窗口不需要换公式。这是"全量程一套测量逻辑"的支点。
-
-三个物理常数 $q$、$I_+$、$I_-$ 由 162 个电流点（±5 ~ 45 nA，0.5 nA 均匀步长，
-正负各 81 点）最小二乘拟合得到，存于 Flash 末页并带 CRC 校验。
-
-## 系统组成
-
-```
-        ┌──────────────┐   SPI    ┌──────────────┐
-  I_in ─┤ ADA4530 积分器├─────────┤ ADS8866 16bit│  观测路 (表征以此为准)
-        │  C=100 pF    │          └──────────────┘
-        │  ADG1219 开关 │  内置ADC ┌──────────────┐
-        │  ±50 nA 参考  ├─────────┤ STM32L431    │  控制路 (bang-bang 判决)
-        └──────┬───────┘          │  + SH1106 OLED│
-               │ 电平移位          │  + CH340G    │
-               │ OPA735           └──────┬───────┘
-               └── V_ad = 1.55 − 0.33·V_o │ 115200 8N1
-                                          ▼
-                              网页控制台 (Web Serial) / Python 脚本
-```
-
-- **模拟前端** — ADA4530 静电计运放积分器（100 pF）+ ADG1219 参考开关 +
-  ±50 nA 参考源；OPA735 电平移位把 ±4.5 V 映射进 ADC 量程
-- **采集** — 双路同拍并行：内置 12-bit ADC 做控制判决，外部 ADS8866（真 16 位）
-  做观测与标定。每窗 6250 点
-- **固件** — [`firmware-v1/`](firmware-v1/)（**现役完整版，被烧录的就是它**：
-  小电流模式、分段校准系数、掉电保存、50 s 长窗口）与
-  [`firmware-v0/`](firmware-v0/)（冻结的旧基线，2026-09-13 止，只读）
-- **上位机** — [`console.html`](console.html)，单文件、无外部依赖、
-  Chrome/Edge 双击即用
-- **硬件文件** — [`hardware/`](hardware/)：嘉立创源工程 + 原理图 + 4 层 Gerber
-
-## 积分窗口
-
-| 电流 | 窗口 | 依据 |
-|---|---|---|
-| $\lvert I \rvert \ge 1$ nA | 1 s | 噪声已足够 |
-| $\lvert I \rvert < 1$ nA | **50 s** | 单次重复性与 $\tau$ 成反比（$\sigma_I\tau\approx$ 常数）|
-
-实测（1 pA ~ 500 pA 段，31 个电流点合并）：10 s 窗单次重复性 0.1153 pA，
-50 s 窗 0.0267 pA，**窗口延长 5 倍、重复性改善 4.3 倍**。
-
-> 亚纳安段统一用 50 s（不设 10 s 中间档），是为了保证光电效应实验 **I–V 曲线
-> 过零点**的判读精度。
-
-## 快速开始
-
-```bash
-# 1. 打开网页控制台（无需安装任何软件）
-#    Chrome / Edge 打开 console.html → 「连接串口」选 CH340 → 「单次测量」
-
-# 2. 命令行采集（Python 侧，接 2636B 源表做标定/表征）
-python tools/nanoammeter_capture.py COM8 --no-noise     # 单次采集 ~15 s
-
-# 3. 构建固件（CMake + arm-none-eabi）
-cd firmware-v1 && cmake --build build/Debug
-```
-
-完整说明见下文各节；脚本索引见 [`tools/README.md`](tools/README.md)。
-
-## 目录
-
-| 目录 | 说明 |
+| 目录 | 内容 |
 |---|---|
-| [`hardware/`](hardware/) | 嘉立创源工程 + 原理图 + Gerber（4 层板）|
-| [`firmware-v1/`](firmware-v1/) | 现役固件（被烧录的那个）|
-| [`firmware-v0/`](firmware-v0/) | 冻结的旧基线，只读归档 |
-| [`tools/`](tools/) | 采集与分析脚本（[索引](tools/README.md)）|
-| [`docs/`](docs/) | 排障记录、实验方案、测量流程 |
-| [`data/`](data/) | 实测数据（标定网格、低电流段、脉冲）|
+| [`hardware/`](hardware/) | 嘉立创 EDA 源工程（含 BOM、网表）、原理图、4 层 Gerber |
+| [`firmware-v1/`](firmware-v1/) | 固件，现役版本 |
+| [`firmware-v0/`](firmware-v0/) | 固件，2026-09-13 冻结基线，只读 |
+| [`pc-console/`](pc-console/) | 上位机：Web Serial 控制台 |
+| [`scripts/smu/`](scripts/smu/) | 2636B 源表控制与采集 |
+| [`scripts/plotting/`](scripts/plotting/) | 绘图 |
+| [`scripts/analysis/`](scripts/analysis/) | 标定、拟合、线性度分析 |
+| [`scripts/lib/`](scripts/lib/) | 公共模块，被上述脚本 import |
+| [`scripts/misc/`](scripts/misc/) | 烧录与杂项 |
+| [`docs/`](docs/) | 排障记录、实验方案、论文节 |
+| [`data/`](data/) | 实测数据 |
 | [`image_paper/`](image_paper/) | 论文插图 |
-| [`console.html`](console.html) | 网页控制台 |
+| [`prototypes/`](prototypes/) | 历史固件归档，只读 |
 
-## 许可
+脚本索引与依赖关系见 [`scripts/README.md`](scripts/README.md)。
 
-<!-- TODO: 选择许可证后填写。硬件设计文件建议 CERN-OHL-P 或 CC BY-SA，
-     固件与脚本建议 MIT 或 Apache-2.0。**在选定之前请勿视为已授权。** -->
+## 3. 硬件 `hardware/`
 
-（尚未选定许可证）
-
----
-
-## 项目结构
-
-| 目录 | 说明 |
-|------|------|
-| `firmware-v1/` | **现役固件**：测量状态机 + OLED 显示 + 串口协议/波形回传 + 小电流模式 + 分段校准系数 + 掉电保存 + 50 s 长窗口。**被烧录的、全部论文数据出自的都是它**。烧录前确认改的是这个目录 |
-| `firmware-v0/` | **冻结的旧基线**：`firmware-v1/` 在 2026-09-13 那次同步时的样子。此后开发**全部只进 v1**，v0 停在原地 —— 两者今差约 1100 行 / 9 个文件（含 50 s 窗口、拉回相、`X=` 字段、`T<ms>` 指令），所以**v0 做不了亚纳安测量**。只读，不再维护 |
-| `console.html` | 网页控制台（Web Serial API，Chrome/Edge 打开即可用）。**「一键采集」** 自动跑 `E→S→B→X→E`，每步独立超时、失败只重发该步；**「实验表征」面板** 负责逐点采集与校准系数收发（只对 firmware-v1 固件有效） |
-| `console_selftest.js` | 控制台自测：从 HTML 提取内联脚本，在 DOM/串口桩里跑 36 项测试 |
-| `console_src/` | 纯函数模块源文件（数据存档与命名），见下 |
-| `docs/` | **排障记录**：[调试与排障.md](docs/调试与排障.md) |
-| `tools/` | `nanoammeter_capture.py` 采集脚本 + `test_capture.py` 其离线回归测试 + `fit_constants.m` 物理常数最小二乘拟合 + `uart_flash.py` 串口烧录器 + SWD 调试 TCL 脚本 |
-
-### 采集脚本（`tools/nanoammeter_capture.py`）
-
-一次运行 = 一次测量，自动落盘 `raw_<MM_DD>_<值>nA.npz` + 同名 `.png` + `.log`（固件说过的每一行 ASCII 原样留档）。连测三个电流就跑三次，得到三份可直接并排比对的图。
-
-```bash
-python tools/nanoammeter_capture.py COM7              # 完整流程 (~65 s)
-python tools/nanoammeter_capture.py COM7 --no-noise   # 跳过底噪 N/W (~15 s)
-python tools/nanoammeter_capture.py --replot [FILE]   # 不接板子，重画已有的 npz
-```
-
-**`--no-noise` 是给 `firmware-v1` 用的。** 该工程已删除底噪指令（见其 README「两个工程的分工」），不加这个开关脚本会在第 7 步干等 90 秒后抛 `TimeoutError`，而 `np.savez` 在那之后 —— **一个文件都写不出来**。
-
-脚本认得两代结果行：`firmware-v0` 的 `I=… nA MODE=n`，和 `firmware-v1` 的 `I=… X=… MODE=n T=…ms [CAL=…]`。后者在 `I=` 与 `MODE=` 之间插了 `X=` 字段，解析正则必须留出那一段，否则文件名会静默退化成 `raw_MM_DD_NO_RESULT.npz`。这条有回归测试兜着：
-
-```bash
-python tools/test_capture.py     # 26 项，纯离线，不碰串口
-```
-
-### 分工：页面只采集与显示，分析交给 MATLAB / Origin
-
-**不在 JS 里重造数学轮子。** 相关性、最小二乘、统计量、拟合一律导出原始数据后用
-MATLAB / Origin 做 —— 那些工具本来就干这个，而且比手写实现更可信。
-
-页面的职责就三件：
-
-1. **采集** —— 发指令、收数据、校验和、断线恢复
-2. **显示** —— 波形渲染（双路叠加、坐标轴、阈值线）和数值
-3. **导出** —— 把原始码值原样存成文件，供外部工具分析
-
-因此 CSV 的设计以「MATLAB/Origin 能直接读」为第一优先：
-
-| 文件 | 内容 | 谁用 |
-|---|---|---|
-| `<stem>_wave.csv` | `index,t_us,code_int,code_ext`（双路同一索引） | MATLAB `readmatrix` / Origin 拖入 |
-| `<stem>_noise.csv` | `t_s,code` | 同上 |
-| `<stem>_meta.json` | 结果行、端口、时间、全部通信协议行（含中文） | 给人看 |
-| `<stem>.png` | 波形图 | 给人看 |
-
-**CSV 硬约束**（中文 Windows 上 MATLAB 与 Origin 对 UTF-8 处理不一致）：
-表头只用英文、数值只用十进制整数、**不得有 BOM**、无注释行、换行统一 `\n`。
-
-### console_src/ 与「内联」约定
-
-`console.html` 必须保持**单文件、可双击打开**，所以
-`console_src/archive.js`（导出与命名）的代码是**内联**进 HTML 的：
-
-| 源文件 | 内容 | 自带测试 |
-|---|---|---|
-| `console_src/archive.js` | `captureStem` 命名、双路 CSV、底噪 CSV、元数据 JSON | `node console_src/archive_test.js`（18 项） |
-
-**改这块逻辑请改源文件，再把内容贴回 HTML。** HTML 里对应段落有醒目注释标边界。
-源文件末尾有 `if (typeof module !== 'undefined' && module.exports)` 守卫 ——
-Node 下可 `require`，内联进浏览器时不会因 `module` 未定义而报错。
-
-改完跑：
-```
-node console_src/archive_test.js    # 模块自身
-node console_selftest.js            # 内联后的整体（25 项）
-```
-| `prototypes/` | 历史固件归档，**只读不再开发**：见下表 |
-
-### prototypes/（历史归档）
-
-| 目录 | 说明 |
-|------|------|
-| `OLED_SH1106/` | 合并版固件前身：测量状态机 + 屏幕显示 + 串口控制/数据回传，硬件验证通过。`firmware-v0/` 的直接祖先，文件列表一致 |
-| `physics_experiment/` | 实机验证版固件：上电自动 bang-bang，积分器闭环 + 阈值 + 电平移位 + ADC 全链路跑通，实采到干净三角波；含 ADS8866 与内置 ADC 同拍并行采集 |
-| `Version1/` | 早期正式版固件（测量核心出处，旧显示驱动） |
-| `Version1.zip` | `Version1/` 的压缩副本，冗余，仅供参考 |
-
-## 硬件架构
-
-- **MCU**: STM32L431CCT6（**HSE 8MHz 晶振** → PLLM=2/N=40 → 80MHz；起振失败自动退回 MSI）
-  > `PLLM=1` 会触发 INVSTATE HardFault（实测，无文档解释）—— L4 配 HSE 建议直接用 `PLLM ≥ 2`。
-- **模拟前端**: ADA4530 积分器（标称 C=100pF）+ ADG1219 参考开关（±5V / 100MΩ = 标称 ±50nA）
-  > ⚠️ ADG1219 是**单刀双掷**：`EN=0` 时两个开关都断，100MΩ 那端是 **Hi-Z、不是 0V**
-  > —— 那个浮空节点经寄生电容会注入一个指数衰减的暂态电荷。**不能把 `EN=0` 当
-  > "0 A 参考"**。详见 [docs/调试与排障.md](docs/调试与排障.md) 的二·补六。
-- **电平移位**: OPA735 反相求和器，`V_ad = 1.55 − 0.33·V_o`（V_o=±4.5V → 0.065~3.035V）
-  → 阈值码 `code_lower=2602`↔V_o=+4.3V，`code_upper=58963`↔V_o=−4.3V
-- **采集（双路同 tick 并行）**:
-  - **控制路径** — PA3 内置 12-bit ADC（ADC 时钟 = SYSCLK 80MHz），
-    12 位左移 4 位归一到 16 位域 → **满量程 65520**、分辨率 16 码。
-    bang-bang 判决与双斜率计时只用它
-  - **观测路径** — ADS8866 16-bit（SPI1），真 16 位、满量程 65535。
-    **不参与控制**，仅同拍并行记录，供对照与后续标定
-
-  > 以上元件值均为**标称值**，绝对增益尚未标定。测得的实际值需复测，
-  > 详见 [docs/调试与排障.md](docs/调试与排障.md)。
-- **显示**: SH1106 1.3" OLED（SPI2，SH1106-master 驱动）
-- **串口**: 板载 CH340G（USB-C），USART1 PA9/PA10，**115200 8N1**
-  （波特率定义在 `firmware-v1/Core/Src/uart.c` 的 `BOARD_BAUD`，**两个固件都是 115200**）
-
-  > 2026-09-16 试过提到 2 Mbps，**当天就改回来了**：那是板载 CH340G 的带宽上限，
-  > 丢字节丢在 CH340 → USB → 主机这一段，重传也补不回来。
-  > 实测 115200 全清 / 921600 有 11% 需重传 / 2 Mbps 基本不可用。
-  > 完整记录见 `uart.c` 的 `BOARD_BAUD` 注释。
-
-## 测量流程（单次语义）
-
-一次指令 = 一次完整测量，测完自动回 IDLE 停住；无取消、无连续模式（越简单越可靠），
-测量期间忽略一切指令。
-
-1. **空闲**：ADG 关断（不注入参考电流），屏幕 `MODE:IDLE`，等待指令
-2. **单次测量**（串口 `S`）：
-
-   ```
-   拉回相 → 模式一 滞回电荷平衡窗口 → 出结果
-   ```
-
-   **拉回相**（阻塞或走 ISR，见下）：空闲态 ADG 断开，积分器被待测电流推到压轨。
-   直接开窗的话窗口开头落在电平移位器饱和区，式(6) 的端点项就是假的。所以先把它
-   **拉到接近 0V**（不是某个阈值——拉到边界是赌电流符号，赌错那侧余量为 0）。
-
-   窗口公式：
-
-   ```
-   I = q·(c2 − c1)/T窗 − (m·I₊ + n·I₋)/N
-       q = C·VREF/(65536·GAIN)        库仑/码
-   ```
-
-   - ≥1nA → 显示 + 上报 → 自动回 IDLE
-   - <1nA → 自动接模式二（双斜率硬积分 10s 多循环）→ 显示 + 上报 → 自动回 IDLE
-
-   > **待测电流必须在整个拉回相期间就接好** —— 拉回本身受它影响（净电流 =
-   > I_ref − I_x，决定拉回多快），中途接入会让起点不可预期。
-
-### 两个固件在模式一上的差别（`firmware-v0` / `firmware-v1`）
-
-| | `firmware-v0`（交付固件） | `firmware-v1`（表征固件） |
-|---|---|---|
-| 拉回相 | 主循环里**阻塞**执行 | 搬进 **TIM6 中断** |
-| 窗口 | 6249 个间隔 = **0.99984 s** | 6250 个间隔 = **1.000 s 整** |
-| 式(6) 分母 | `m+n−1`（减掉窗口外那一拍） | **`m+n`** |
-| 与论文 `(m+n)` 形式 | 差 `0.99984` 与 `8.04 pA` | **精确一致** |
-
-**两者都是精确的**，区别只是分母能不能直接对上论文。实验固件把拉回搬进中断，是为了
-让"拉回最后一拍"直接当窗口起点 `V_01` 用——只有 ISR 采样才和后面的采样点在同一套
-节拍网格上（在主循环里读的话，`V_01` 到采样点 0 的间隔会多出"读一次 ADC + 启动
-TIM6"那两截，折算约 0.5~1 pA 的恒定误差）。详见
-[firmware-v1/README](firmware-v1/README.md)。
-
-## 串口协议（115200 8N1）
-
-| 指令 | 功能 | 响应 |
-|------|------|------|
-| `S` | 单次测量（测完自动回空闲） | `START MODE1` → … → `I=+12.345 nA MODE=1`（或 MODE=2） |
-| `D` | 查询最近结果 | `RESULT I=+12.345 nA MODE=1`（无结果 `RESULT NONE`） |
-| `B` | 回传最近窗口波形（内置 ADC） | `WAVE 6250` + 12500 字节小端 u16 + 2 字节校验和 |
-| `X` | 回传同一窗口波形（ADS8866） | `WAVEX 6250` + 同上格式 |
-| `E` | 观测通路自检 | `EXT N=… ERR=… TXE=… RXNE=… BSY=… PRE=…` |
-| 自动 | <1nA 切模式二 | `MODE2 START (I<1nA)` |
-
-`B`/`X` 两路同 tick 采集、同索引，**可直接逐点对照**。回传块格式一致：
-
-```
-"<tag> <count>\r\n"  +  count×2 字节小端 u16  +  2 字节校验和（样本和）
-```
-
-### 实验表征固件（`firmware-v1`）额外的字段与指令
-
-| | |
+| 文件 | 说明 |
 |---|---|
-| 结果行 | 多出 `X=`（ADS8866 那一路）、`T=`（实际积分时长 ms）、`CAL=`、`RAW` 段 |
-| `C` / `K<段>,<a_ppm>,<b_fA>` / `Z` | 分段校准系数 `I_cal = a·I_raw + b` 的查询 / 写入 / 清除 |
-| `Q` / `Q<q_aC>,<i+_pA>,<i-_pA>` | 物理常数（库仑/码、两个参考电流）的查询 / 写入 |
-| `T<秒>` | 小电流模式积分时长 |
+| `jlc-project.zip` | 嘉立创 EDA 专业版工程（原理图 + PCB + BOM + 网表）|
+| `Schematic.png` | 原理图 |
+| `gerber/` | Gerber 制板文件（4 层板 + 3 个钻孔文件）|
 
-**`C` 的响应格式不可追加字段**（上位机正则锚定行尾），所以物理常数走单独的 `Q`。
-两者都存 Flash 最后一页，掉电不丢 —— 队友重新标定只要串口发一条指令，不用重编译
-烧录。详见 [firmware-v1/README](firmware-v1/README.md)。
+`jlc-project.zip` 解压得 `.epro2`，经嘉立创 EDA（专业版）`文件 → 打开工程` 导入；
+元件属性含立创商城料号，可直接下单。
 
-指令大小写不敏感，行结束符忽略；**测量期间指令被忽略**（结果出来后才接受下一次）。
+**板级配置**
 
-> `firmware-v0` 里 `N`（底噪标定）与 `W`（底噪逐秒序列）命令**仍在**，但已决定删除
-> （上位机侧已移除）。`firmware-v1` 已经删掉了。
-> 原因见 [docs/调试与排障.md](docs/调试与排障.md)；固件侧删除待下次烧录一并做。
+| 项 | 器件 |
+|---|---|
+| MCU | STM32L431CCT6 |
+| 模拟前端 | ADA4530 静电计运放（积分电容 100 pF）+ ADG1219 参考开关 + OPA735 电平移位 |
+| 采集 | 内置 12-bit ADC（控制路）+ ADS8866 16-bit（观测路，SPI）|
+| 显示 / 通信 | SH1106 1.3" OLED（SPI）/ 板载 CH340G（USB-C）|
+| 参考电流 | ±50 nA（±5 V 经 100 MΩ，标称值）|
 
-按键功能已全部关闭（`BUTTON_DISABLED`）。注意：PB4 是否真的故障
-**尚未复核**，见 [docs/调试与排障.md](docs/调试与排障.md) 第五、六节。
-控制一律走串口 / HTML 控制台。
+> 元件值均为标称值，绝对增益尚未标定；实测参考电流与积分电容值见
+> [`firmware-v1/Core/Inc/current.h`](firmware-v1/Core/Inc/current.h)。
 
-## 构建
+## 4. 固件 `firmware-v1/`
 
+STM32L431 固件，CMake 工程（亦可由 CubeIDE 打开）。**固件改动仅限本目录**；
+`firmware-v0/` 为冻结基线（只读），缺 50 s 长窗、拉回相、`X=` 字段与 `T<ms>` 指令，
+不支持亚纳安测量。
+
+`Core/Src/` 模块划分：
+
+| 模块 | 职责 |
+|---|---|
+| `main.c` | 主循环、串口指令分发 |
+| `measurement_state.c` | 测量状态机（空闲 / 拉回相 / 模式一 / 模式二）|
+| `current.c` | ±50 nA 参考、式(6) 计算、分段校准 |
+| `adc.c` `ads8866.c` | 双路同拍采集 |
+| `cal_coef.c` `cal_mode.c` | 校准系数存储（Flash + CRC）、标定模式 |
+| `sh1106.c` | OLED 显示 |
+| `uart.c` | 串口协议、波形回传 |
+| `tim.c` `spi.c` `gpio.c` `button.c` | 外设 |
+
+```bash
+cd firmware-v1
+cmake --preset Debug && cmake --build build/Debug
+# 产物：build/Debug/firmware-v1.elf
 ```
-cmake --preset Debug
-cmake --build build/Debug
+
+烧录：ST-Link + OpenOCD（`scripts/misc/run_app.sh` 可绕过"复位进 ROM bootloader"），
+或串口 bootloader（`scripts/misc/uart_flash.py`）。
+
+串口协议见 §9；固件内部细节见 [`firmware-v1/README.md`](firmware-v1/README.md)。
+
+## 5. 2636B 源表控制与采集 `scripts/smu/`
+
+Keithley 2636B（LAN / pyvisa），用于标定与表征；另含本装置的串口采集。
+
+| 脚本 | 用途 |
+|---|---|
+| `cal_sweep.py` | 底层驱动（串口 + 源表 + 测量原语）|
+| `sweep_dense.py` | 密集电流网格扫描（整窗回传）|
+| `sweep_broad.py` `sweep_dc.py` `sweep_iv.py` | 宽范围 / 直流 / 光电探测器 I–V 扫描 |
+| `sweep_pulse.py` | 脉冲采集（TSP 脉冲源）|
+| `nanoammeter_capture.py` | 单次采集 → npz / png / log（v1 需 `--no-noise`）|
+| `test_smu.py` | 源表连通与功能自检 |
+| `warm_test.py` | 预热必要性对照 |
+| `pulse_real.py` `pulse_probe.py` `pulse_introspect.py` | 脉冲重建 / 能力探针 / 内省 |
+| `measure_transient.py` `switching_times.py` `range_test.py` | 瞬态 / 开关时序 / 量程效应 |
+| `test_capture.py` | `nanoammeter_capture` 离线回归（26 项）|
+
+```bash
+pip install pyvisa pyserial numpy matplotlib
+python scripts/smu/test_smu.py
+python scripts/smu/nanoammeter_capture.py COM8 --no-noise
 ```
 
-工具链：STM32Toolchain（arm-none-eabi GCC + CMake + Ninja）。
-烧录：ST-Link + OpenOCD（`interface/stlink-v2-1.cfg`，克隆调试器必须用此文件），
-或 `tools/uart_flash.py`（BOOT0 拉高复位进系统 Bootloader）。
+> `cal_sweep.py` 的 `MEASURE_TIMEOUT_S` 必须覆盖固件最长窗口（50 s → 已设 60）。
 
-## 标定
+## 6. 绘图 `scripts/plotting/`
 
-### 标定固件（`CAL_MODE` 宏切换，`cal_mode.h`）
+论文插图生成，统一风格见 `scripts/lib/paper_style.py`。
 
-正常固件与标定固件共用工程，靠宏切换：
+| 脚本 | 输出 |
+|---|---|
+| `paper_figs.py` | 低电流段图 |
+| `paper_lin10_fig.py` | ±10 nA 组 |
+| `paper_pulse_fig.py` | 脉冲四格图 |
+| `photoelectric_fig.py` `photo_data_fig.py` `dark_current_fig.py` | 光电效应 / 光电数据 / 暗电流 |
+| `residual_pct_plot.py` | ±5–45 nA 残差百分比图 |
+| `console_figure.py` | 控制台截图（注入真实数据后 Chrome headless 渲染）|
 
-| 宏值 | 模式 | 行为 | 用途 |
-|------|------|------|------|
-| `CAL_NONE` | 正常测量 | 单次测量流程（默认） | 日常固件 |
-| `CAL_ZERO` | 零位检查 | **ADG 全断**，采样若干秒/轮，逐轮上报 `CAL ZERO: MEAN=… Vadc=…V STD=… DRIFT=…uV/s IB=…fA` | 校验 1.55V 偏移、噪声水平、偏置电流 |
-| `CAL_BANG` | 无输入 bang-bang | 模式一连续窗口，每窗上报 `CAL BANG: m=… n=… VPP=…V MIN=… MAX=… I=…nA` | 波峰波谷码 = 切换阈值点 |
+## 7. 分析 `scripts/analysis/`
 
-> ⚠️ **`CAL_ZERO` 是 `ADG 全断`——也就是 Hi-Z 状态**（见「硬件架构」那节的警告）。
-> 它报出来的 `DRIFT`/`IB` 会被那个暂态污染，**用之前先看二·补六**。
->
-> `CAL_ZERO` 的 `ZERO=` 字段是**平均电平**（一个电压），不是电流 —— 积分器没有直流
-> 反馈路径，稳态停住 ⟺ 净电流为零，所以**电平不携带电流信息，只有斜率携带**。
+标定常数拟合、线性度、误差预算与脉冲分析。
 
-### 到底要标哪几个常数
+| 脚本 | 用途 |
+|---|---|
+| `fit_constants.m` `make_fit_csv.py` | 三常数（M、I₊、I₋）最小二乘拟合 |
+| `fit_linearity.py` `fit_tau.py` | 早期拟合链 |
+| `cal_table.py` `detect_limit.py` | 标定表 / 检测下限 |
+| `lowI_compare.py` | 误差链：装置 / 设定 / 源表回读 |
+| `outlier_test.py` `.m` | 离群值检验（Python / MATLAB 互校）|
+| `seg0_budget.py` `seg0_joint_fit.py` `fsw_hypothesis.py` | 低电流段偏置分析与假设检验 |
+| `reproducibility.py` `endpoint_codes.py` `range_effect.py` `window_sawtooth.py` `raw_recalc.py` | 复现性 / 端点码 / 量程效应 / 锯齿形态 / 原始码反推 |
+| `analyze_pulse.py` `sim_pulse_recover.py` | 脉冲分析 / 恢复仿真 |
+| `matlab_utf8.sh` | MATLAB UTF-8 包装 |
 
-把式(6) 在物理上化简到底，需要外部知道的只有 **3 个数**：
+推导见 [`docs/校准方案推导.md`](docs/校准方案推导.md)，操作步骤见
+[`docs/拟合操作指南.md`](docs/拟合操作指南.md)。
+
+## 8. 上位机 `pc-console/`
+
+单文件 Web Serial 控制台，无外部依赖，Chrome / Edge 直接打开 `console.html`。
+
+| 文件 | 说明 |
+|---|---|
+| `console.html` | 控制台；「一键采集」执行 `E→S→B→X→E`，「实验表征」面板负责逐点采集与系数收发（仅 v1）|
+| `console_selftest.js` | 整体自测（36 项）|
+| `console_src/archive.js` | 数据存档与命名模块，内联进 HTML |
+| `console_src/archive_test.js` | 模块自测（18 项）|
+
+```bash
+node pc-console/console_src/archive_test.js
+node pc-console/console_selftest.js
+```
+
+## 9. 测量与协议
+
+**积分窗口**
+
+| 电流 | 窗口 |
+|---|---|
+| $\lvert I \rvert \ge 1$ nA | 1 s |
+| $\lvert I \rvert < 1$ nA | 50 s |
+
+实测（1 pA–500 pA 段，31 点合并）：10 s 窗单次重复性 0.1153 pA，50 s 窗 0.0267 pA。
+亚纳安段统一取 50 s，以保证光电效应实验 I–V 曲线过零点的判读精度。
+
+**串口协议（115200 8N1）**
+
+| 指令 | 功能 |
+|---|---|
+| `S` | 单次测量（测完回空闲）|
+| `D` | 查询最近结果 |
+| `B` / `X` | 回传窗口波形（内置 ADC / ADS8866），`"<tag> <count>\r\n"` + u16 小端 + 校验和 |
+| `E` | 观测通路自检 |
+| `Q` `Q<q_aC>,<i+_pA>,<i-_pA>` | 物理常数查询 / 写入（Flash，掉电不丢）|
+| `K<段>,<a_ppm>,<b_fA>` `C` `Z` | 分段校准系数写入 / 查询 / 清除 |
+| `T<ms>` | 强制积分窗口（`T0` 回自动）|
+
+指令大小写不敏感，测量期间忽略。
+
+## 10. 标定
+
+式(6) 化简后仅需三个外部常数：
 
 ```
 I = q·(c2 − c1)/T窗 − (m·I₊ + n·I₋)/N
-
-  q = C·VREF/(65536·GAIN)     库仑/码      标称 1.5259e-14
-  I₊, I₋                      两个参考电流 标称 ±50 nA
+  q = C·VREF/(65536·GAIN)   库仑/码   标称 1.5259e-14
+  I₊, I₋                    参考电流  标称 ±50 nA
 ```
 
-**两个关键简化，能砍掉一半的标定项：**
+简化：① 电平移位 1.55 V 在 `Vo1 − Vo2` 中相消，无需标定；② `q` 的四个因子只测乘积。
 
-1. **`LEVELSHIFT_V_ADC_ZERO`(1.55V) 不需要标** —— 它在 `Vo1 − Vo2` 里**约掉了**。
-   它只影响阈值码和拉回目标，那些不直接进公式。
-2. **`q` 的 4 个因子（`C` / `VREF` / `GAIN` / 时间）不必分开测** —— 只测**乘积**。
-   而且 `C` 和电平移位增益**分不开、也不用分**：`C` 在整个公式里只出现在 `q` 里。
-
-### 怎么测
-
-| 量 | 方法 | 判据 |
-|---|---|---|
-| **`I₊`/`I₋`** | **推荐：用 [tools/fit_constants.m](tools/fit_constants.m) 对一串已知输入做最小二乘** | 和 `V/R` 独立测量对照 |
-| **`q`** | 灌已知电流 `I`、积已知时间 `T`、读码差 `Δc`：`q = I·T/Δc`。**两点一除，没有拟合** | 落在标称 `1.5259e-14` 的 ±5% 内 |
-| **`I₊`/`I₋`（备选）** | 短接积分节点，万用表量 100MΩ 上的压降：`I = V/R` | 注意 `R` 本身只有 ±1%（万用表 100MΩ 量程） |
-| **分段 `a`/`b`** | 若要沿用：每个量程测若干已知电流点拟合 `I_cal = a·I_raw + b` | **在 MATLAB / Origin 里做**，不进固件 |
-
-### `fit_constants.m`：一次拟合三个物理常数
-
-> 📖 **第一次用 MATLAB？看 [docs/拟合操作指南.md](docs/拟合操作指南.md)** ——
-> 从采数据到把结果发给固件，逐步写清，面向初学者。
-
-把式(6) 的三个常数 **`M`（含电平移位增益的等效电容）、`I₊`、`I₋`** 一起拟合出来。
-整条链路：
-
-```bash
-# 1. 对每个已知电流采一次（--true= 记下这次输入的真值，单位 nA）
-python tools/nanoammeter_capture.py COM7 --no-noise --true=25.0
-
-# 2. 把所有 npz 汇总成 CSV（自动配对，不要手工抄）
-python tools/make_fit_csv.py -d . -o fit_data.csv
-
-# 3. 拟合
-bash tools/matlab_utf8.sh "cd('tools'); fit_constants('../fit_data.csv')"
-bash tools/matlab_utf8.sh "cd('tools'); test_fit_constants"   # 自测（合成数据，无需硬件）
-```
-
-CSV 表头 `I_true,c1,c2,m,n`：已知输入电流、窗口两端原始码、POS/NEG 周期数 ——
-后四个都直接从结果行 `RAW` 段来。**已知电流必须 ≥ 1 nA**（式(6) 是模式一的公式，
-低于 1 nA 会切小电流模式，不出 `RAW` 段）。
-
-> **不要按 `I₊`/`I₋` 各一列去拟合** —— `m/(m+n)` 与 `n/(m+n)` 恒有"两列之和 = 1"，
-> 高度共线、方差被放大。脚本用等价重参数化（`M`、常数项、`a₂` 三列）绕开，
-> 条件数从上千降到 **20**。
-
-**⚠️ 两个杠杆的性质不同，一个受控、一个不受控。**
-
-| 项 | 杠杆由什么决定 | 能不能在设计阶段保证 |
-|---|---|---|
-| 计数项 `(I₊−I₋)·a₂` | **占空比的跨度**（≈60 nA） | ✅ **能** —— 只要已知电流跨量程、正负都有 |
-| 端点项 `M·a₁` | **端点码差的跨度** | ❌ **不能** |
-
-**端点差为什么不受控**：窗口长度固定 6250 拍，锯齿周期由被测电流决定，所以终点
-相位 = `6250 mod 周期(I_x)` —— **同一个电流重复测，相位每次都一样**，重复只能压低
-噪声、不能增加跨度。极端情况下 `Δc` 近乎恒定，`M` **完全不可识别**。
-
-**所以：**
-
-| 量 | 用什么方法 |
+| 量 | 方法 |
 |---|---|
-| `I₊`/`I₋` | ✅ **闭环最小二乘拟合** —— 杠杆由实验设计保证 |
-| `q` | ⚠️ **专门的"灌已知电流"开环测量** —— 不依赖锯齿相位这个假设 |
+| `I₊` / `I₋` | 闭环最小二乘（`analysis/fit_constants.m`）|
+| `q` | 灌已知电流开环测量，不依赖锯齿相位假设 |
 
-> 开环也不能靠"参考断开"—— `EN=0` 是 Hi-Z 不是 0 A（见上）。
-> 固定参考极性即可。
+> `q` 不可用"参考断开 + 灌电流"法：`EN=0` 为 Hi-Z 而非 0 A，浮空节点寄生电容会注入
+> 衰减暂态电荷。见 [`docs/调试与排障.md`](docs/调试与排障.md)。
 
-**先量，不要猜**：第一次实测后看 `make_fit_csv.py` 打印的 `c2-c1` 跨度 ——
-铺满大半个摆幅就用闭环拟合，只有几万分之一就用开环。
-`fit_constants.m` 会按**实测数据**把杠杆算出来打印，不需要预先假设。
+`firmware-v0` 常数存编译期宏；`firmware-v1` 存 Flash 末页（带 CRC），串口 `Q`/`K` 读写，
+重新标定无需重编译。
 
-> 完整推导（含"同一个量猜了两次、结论完全相反"的方法学教训）见
-> [docs/校准方案推导.md](docs/校准方案推导.md)。
+## 11. 排障
 
-脚本会给每个参数**标准误**，并自动计算杠杆比、在数据退化时报警（条件数 → 1e17）。
+调试手段、工程结论与待复核项见 [`docs/调试与排障.md`](docs/调试与排障.md)。
 
-> ⚠️ **`q` 不能用"参考断开 + 灌电流"那种测法** —— `EN=0` 是 Hi-Z 不是 0 A，
-> 那个浮空节点的寄生电容会注入一个指数衰减的暂态电荷（`C_p=10pF` 时约 50 pC，
-> 折合 12.5% 误差）。改用 `I₊` 自标（ADG 固定极性、关掉 bang-bang）。
-> 详见 [docs/调试与排障.md](docs/调试与排障.md) 的二·补六。
+> 该记录对应一版存在设计缺陷的硬件，其中的硬件接线与结论不具通用性；作者将在开源方案
+> 中发布修正后的硬件版本，届时以新版文档为准。
 
-### 这些常数存在哪
+## 许可
 
-| | `firmware-v0`（交付固件） | `firmware-v1`（表征固件） |
-|---|---|---|
-| 物理常数 | `current.h` 的**编译期宏** | Flash 最后一页（`cal_coef.c`），串口 `Q` 指令读写 |
-| 分段系数 `a`/`b` | 无 | 同上，串口 `K` / `C` / `Z` |
-
-**实验固件走 Flash**，是为了让队友重新标定时只要串口发一条指令，不用装工具链、
-不用重编译烧录。
-
-> ⚠️ `CAL_ZERO` 模式是 `ADG 全断`——也就是上面说的 Hi-Z 状态，它测到的
-> `DRIFT`/`IB` 会被那个暂态污染。**用之前先看二·补六。**
-
-## 排障
-
-调试手段、已验证的工程结论、踩过的坑、待复核项、已排除的怀疑方向 ——
-全部在 **[docs/调试与排障.md](docs/调试与排障.md)**。
-
-> ### ⚠️ 那份记录是「某一版特定硬件」的，**不必要参考**
->
-> **本项目遇到过的大部分问题，根因是硬件设计错误，不是软件问题。**
-> 那份文档记录的是**这一版（有缺陷的）硬件**上踩到的坑。
->
-> **作者将在开源方案时发布修正后的硬件版本。** 那一版的前端拓扑、器件选型、
-> 接线与供电都可能与文档描述**完全不同** —— 届时以新版硬件文档为准。
->
-> 文档内部按「是否可参考」逐节标了（软件层的固件坑与调试教训可参考；
-> 硬件接线、待复核、已排除的怀疑方向仅对本版有效）。
-
-一句话预告里面有什么：
-
-- **烧录与读内存**：OpenOCD 命令、`nm` 查符号 + `mdw` 读 RAM、halt 读 PC 判位置
-- **克隆 ST-Link 的 VTref 假警报**怎么判（别被它误导去推翻已有诊断）
-- **固件已验证的坑**：ADC 时钟必须 SYSCLK、中断内不能用 `HAL_GetTick`、
-  守卫不能写 `guard-- > 0U`、L4 校准会关 ADC、ADS8866 的 3 线 CS 模式
-- **内置 ADC 的码域**：12 位左移 4 位 → 全是 16 的倍数、满量程 65520 而非 65535
-- **OLED 接线与初始化**（含电荷泵使能那几条，缺了屏幕不亮）
-- **待复核项**：HSE 晶振、拉回相、模式二单极性、窗口计数与 ADG 相位
-- **已排除的怀疑方向**：列出来只为避免有人再走一遍
-- **调试教训**：日志下标与环形缓冲对不上时先怀疑计数器语义，等
+尚未选定。
+（硬件建议 CERN-OHL-P 或 CC BY-SA；固件与脚本建议 MIT 或 Apache-2.0。）

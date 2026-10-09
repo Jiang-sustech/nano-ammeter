@@ -193,7 +193,7 @@ n_total = m_count + n_count = 6250      ← 不用减一
 小电流模式（`MODE=2`）**不出** `RAW` 段：它不算 `m`/`n`，用的是起点/终点两段
 平均，原始量是另一套（`T=` 已经给了它的实际积分拍数）。
 
-`tools/nanoammeter_capture.py` 会把这一段解析进 npz 的 `raw_m` / `raw_n` /
+`scripts/smu/nanoammeter_capture.py` 会把这一段解析进 npz 的 `raw_m` / `raw_n` /
 `raw_int1` … 字段；没有这一段时一律记 `-1`（**不伪造成 0**）。
 
 ### 校准系数指令

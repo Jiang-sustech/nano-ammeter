@@ -3,4 +3,4 @@ __pycache__/
 build/
 
 # UART 烧录用的 .bin 是构建产物, 由 elf 一条命令生成 (objcopy), 不入库
-tools/*.bin
+scripts/*/*.bin
