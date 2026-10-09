@@ -9,6 +9,15 @@
 | [`jlc-project.zip`](jlc-project.zip) | **嘉立创EDA专业版工程源文件**（原理图 + PCB + BOM + 网表）|
 | [`Schematic.png`](Schematic.png) | 原理图（整页）|
 | [`gerber/`](gerber/) | Gerber 制板文件（4 层板 + 3 个钻孔文件）|
+| [`enclosure.stp`](enclosure.stp) | **铝合金外壳 3D 模型**（嘉立创 FA 壳体，STEP 格式）|
+
+## 外壳（嘉立创 FA 铝合金壳体）
+
+`enclosure.stp` 是整机的铝合金外壳模型（STEP AP214），导入 SolidWorks / Fusion 360 /
+FreeCAD 等即可查看或二次修改。模型来自嘉立创 FA 的壳体定制服务。
+
+> STEP 文件头里的作者字段（`Gilles Foucault` / `UJF`）是嘉立创导出模板的**默认占位**，
+> 非设计者信息。
 
 ## 源工程（嘉立创EDA专业版）
 

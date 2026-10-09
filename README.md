@@ -46,6 +46,7 @@ $$I_{\text{out}}=\frac{1}{\tau}\int_{t-\tau}^{t} i(t)\,\mathrm{d}t$$
 | `jlc-project.zip` | 嘉立创 EDA 专业版工程（原理图 + PCB + BOM + 网表）|
 | `Schematic.png` | 原理图 |
 | `gerber/` | Gerber 制板文件（4 层板 + 3 个钻孔文件）|
+| `enclosure.stp` | 铝合金外壳 3D 模型（STEP）|
 
 `jlc-project.zip` 解压得 `.epro2`，经嘉立创 EDA（专业版）`文件 → 打开工程` 导入；
 元件属性含立创商城料号，可直接下单。
