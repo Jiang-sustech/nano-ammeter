@@ -51,6 +51,8 @@ $$I_{\text{out}}=\frac{1}{\tau}\int_{t-\tau}^{t} i(t)\,\mathrm{d}t$$
 `jlc-project.zip` 解压得 `.epro2`，经嘉立创 EDA（专业版）`文件 → 打开工程` 导入；
 元件属性含立创商城料号，可直接下单。
 
+![原理图](hardware/Schematic.png)
+
 **板级配置**
 
 | 项 | 器件 |
