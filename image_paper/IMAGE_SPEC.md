@@ -3,8 +3,30 @@
 > 定于 2026-09-16。模板 = 原 `data/cal_162.png` 的做法（图名落正下方、正红/蓝/黑三色、
 > 单位写在轴标签里），按论文要求删掉说明性文字，并把字号与图幅**钉死**。
 >
-> 代码实现：`tools/paper_style.py`　出图脚本：`tools/paper_figs.py`
-> 复现：`python tools/paper_figs.py`
+> 代码实现：`scripts/lib/paper_style.py`　出图脚本：`scripts/plotting/paper_figs.py`
+> 复现：`python scripts/plotting/paper_figs.py`
+
+---
+
+> ## ✅ 已定案：三常数用**拟合小数** `CONST_FIT`（2026-09-21 用户裁定）
+>
+> - `CONST_FIT` 最小二乘拟合值（小数）：`I+ = 49.71213`、`I- = -49.73860` ← **全图册用这套**
+> - ~~`CONST_FW` 固件存储值（整数 pA）：`I+ = 49712`、`I- = -49739`~~ 不再用于出图
+>
+> 两套差 **0.27 pA**。切换前后各图数字变化（引用时以本表为准）：
+>
+> | 量 | 旧（FW）| **新（FIT）** |
+> |---|---|---|
+> | 图 2 残差 RMS | 1.332 pA | **1.297 pA** |
+> | 图 2 线性度 | 0.00458 %FS | **0.00421 %FS** |
+> | 图 3 绝对偏差中位 | 0.538 pA | **0.273 pA** |
+> | **图 3 的 5 % 交点** | 11.1 pA | **4.93 pA** |
+> | 图 6 / 6b 绝对偏置 | +0.6637 pA | **+0.3987 pA** |
+>
+> 实现：`uncal_vs_cal.py` 与 `rel_accuracy.py` 显式传入 `*CONST_FIT`
+> （`report_table.i_of()` 的**默认仍是 FW**，改动有意限制在出图脚本，
+> 以免影响 `report_table` / `detect_limit` 等表格类脚本）。
+> 各图的图名里都写明了用的是哪一套。
 
 ---
 
@@ -15,11 +37,12 @@
 | 图 | 文件 | 宽 × 高 (cm) | 画布框比例 | 说明 |
 |---|---|---|---|---|
 | 图 1 | `fig01_uncal.png` | 17.0 × 9.7 | **2 : 1** | 散点 + 参考线 |
-| 图 2 | `fig02_cal.png` | 17.0 × 20.0 | 自由 | 上下两格 |
+| 图 2 | `fig02_cal.png` | 17.0 × 10.5 | 自由 | 单格（残差格已于 2026-09-21 按要求删去）|
 | 图 3 | `fig03_lowI_error.png` | 17.0 × 13.0 | 自由 | 单格 |
 | 图 4 | `fig04_rel_accuracy.png` | 17.0 × 18.0 | 自由 | 上下两格 |
 | 图 5 | `fig05_pulse_waveform.png` | 17.0 × 18.5 | 自由 | 2×2 四格 |
-| 图 6 | `fig06_lin10_residual.png` | 17.0 × 11.0 | 自由 | 单格 |
+| 图 6 | `fig06_lin10_residual.png` | 17.0 × 11.0 | 自由 | 单格，**绝对**偏置 |
+| 图 6b | `fig06b_lin10_relerror.png` | 17.0 × 12.0 | 自由 | 同批数据，**相对**偏差（±10 pA）|
 | 图 7~9 | `fig0[789]_*nm_compare.png` | 17.0 × 14.5 | 自由 | **左右对照**：左零电流法 / 右交点法 |
 | 图 10 | `fig10_einstein_compare.png` | 17.0 × 13.0 | 自由 | Vs–ν 左右对照，两种定 $V_s$ 方法 |
 | （旧） | `fig0[789]_photoelectric_*.png`、`…_inter.png`、`fig1[01]_einstein_plot*.png` | — | — | 单方法分幅版，已被上面四张取代，留档 |
@@ -142,7 +165,7 @@
 ## 八、复现
 
 ```bash
-python tools/paper_figs.py          # 四张一次出齐 -> image_paper/
+python scripts/plotting/paper_figs.py          # 四张一次出齐 -> image_paper/
 ```
 
-改规范只改 `tools/paper_style.py` 顶部的常量，不要在各图函数里写死字号。
+改规范只改 `scripts/lib/paper_style.py` 顶部的常量，不要在各图函数里写死字号。
